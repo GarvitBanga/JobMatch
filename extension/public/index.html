@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bulk-Scanner Resume Matcher</title>
+    <style>
+        body {
+            width: 400px;
+            height: 600px;
+            margin: 0;
+            padding: 20px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        
+        .header {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        
+        .logo {
+            width: 48px;
+            height: 48px;
+            margin: 0 auto 10px;
+            background: rgba(255,255,255,0.2);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+        }
+        
+        h1 {
+            margin: 0;
+            font-size: 18px;
+            font-weight: 600;
+        }
+        
+        .subtitle {
+            font-size: 12px;
+            opacity: 0.8;
+            margin-top: 5px;
+        }
+        
+        .scan-section {
+            background: rgba(255,255,255,0.15);
+            border-radius: 12px;
+            padding: 20px;
+            margin: 20px 0;
+            text-align: center;
+        }
+        
+        .scan-button {
+            background: rgba(255,255,255,0.9);
+            color: #667eea;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+            width: 100%;
+            font-size: 14px;
+            transition: all 0.3s ease;
+        }
+        
+        .scan-button:hover {
+            background: white;
+            transform: translateY(-2px);
+        }
+        
+        .scan-button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+        
+        .status {
+            margin: 15px 0;
+            padding: 10px;
+            border-radius: 6px;
+            font-size: 12px;
+            text-align: center;
+        }
+        
+        .status.loading {
+            background: rgba(255,255,255,0.1);
+        }
+        
+        .status.success {
+            background: rgba(16,185,129,0.3);
+        }
+        
+        .status.error {
+            background: rgba(239,68,68,0.3);
+        }
+        
+        .results {
+            max-height: 300px;
+            overflow-y: auto;
+            margin-top: 15px;
+        }
+        
+        .job-item {
+            background: rgba(255,255,255,0.1);
+            border-radius: 8px;
+            padding: 12px;
+            margin: 8px 0;
+            font-size: 12px;
+        }
+        
+        .job-title {
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+        
+        .job-company {
+            opacity: 0.8;
+            margin-bottom: 6px;
+        }
+        
+        .match-score {
+            background: rgba(16,185,129,0.8);
+            color: white;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            float: right;
+        }
+        
+        .actions {
+            margin-top: 20px;
+            padding-top: 15px;
+            border-top: 1px solid rgba(255,255,255,0.2);
+        }
+        
+        .action-button {
+            background: transparent;
+            color: white;
+            border: 1px solid rgba(255,255,255,0.3);
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-size: 12px;
+            cursor: pointer;
+            margin: 0 5px;
+            transition: all 0.3s ease;
+        }
+        
+        .action-button:hover {
+            background: rgba(255,255,255,0.1);
+        }
+        
+        .hidden {
+            display: none;
+        }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+        <div class="logo">🎯</div>
+        <h1>Resume Matcher</h1>
+        <div class="subtitle">AI-Powered Job Matching</div>
+    </div>
+    
+    <div class="scan-section">
+        <button id="scanButton" class="scan-button">
+            🔍 Scan Current Page
+        </button>
+        
+        <div id="status" class="status hidden">
+            Ready to scan...
+        </div>
+        
+        <div id="results" class="results hidden">
+            <!-- Job matches will appear here -->
+        </div>
+    </div>
+    
+    <div class="actions">
+        <button id="settingsButton" class="action-button">⚙️ Settings</button>
+        <button id="helpButton" class="action-button">❓ Help</button>
+    </div>
+    
+    <script src="popup.js"></script>
+  </body>
+</html>
