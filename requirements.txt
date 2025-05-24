@@ -28,7 +28,7 @@ faiss-cpu==1.7.4
 
 # Web Scraping
 playwright==1.40.0
-beautifulsoup4==4.12.2
+beautifulsoup4>=4.12.0
 lxml==4.9.3
 
 # Parsing
@@ -52,4 +52,7 @@ loguru==0.7.2
 pytest==7.4.3
 pytest-asyncio==0.21.1
 black==23.11.0
-ruff==0.1.6 
+ruff==0.1.6
+
+# Enhanced dependencies for job content extraction
+requests>=2.31.0 
