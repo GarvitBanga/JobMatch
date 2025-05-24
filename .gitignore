@@ -1,355 +1,59 @@
 # =============================================================================
-# 🔒 SECURITY - API Keys & Environment Variables (CRITICAL!)
+# 🔒 SECURITY - API Keys (ABSOLUTELY CRITICAL!)
 # =============================================================================
 .env
 .env.*
 !.env.example
 *.key
 *.pem
-*.p12
-*.pfx
 config.json
 secrets.json
 
 # =============================================================================
-# 🐍 Python
+# 🐍 Python Backend
 # =============================================================================
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
+*.pyc
+*.pyo
 *.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
-# PyInstaller
-*.manifest
-*.spec
-
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
-
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
-.pytest_cache/
-cover/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# IPython
-profile_default/
-ipython_config.py
-
-# pyenv
-.python-version
-
-# pipenv
-Pipfile.lock
-
-# poetry
-poetry.lock
-
-# pdm
-.pdm.toml
-
-# PEP 582
-__pypackages__/
-
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
-
-# SageMath parsed files
-*.sage.py
-
-# Environments
-.venv
-env/
+.Python
 venv/
-ENV/
-env.bak/
-venv.bak/
-
-# Spyder project settings
-.spyderproject
-.spyproject
-
-# Rope project settings
-.ropeproject
-
-# mkdocs documentation
-/site
-
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
-
-# Pyre type checker
-.pyre/
-
-# pytype static type analyzer
-.pytype/
-
-# Cython debug symbols
-cython_debug/
+.venv/
+env/
 
 # =============================================================================
-# 🗄️ Database Files
+# 📱 Chrome Extension 
 # =============================================================================
-*.sqlite
-*.sqlite3
-*.db
-*.database
-
-# =============================================================================
-# 📝 Logs & Debug Files
-# =============================================================================
-*.log
-*.out
-*.err
-logs/
-debug.log
-error.log
-access.log
-server.log
-
-# =============================================================================
-# 💾 IDE & Editor Files
-# =============================================================================
-# VS Code
-.vscode/
-*.code-workspace
-
-# PyCharm
-.idea/
-*.iws
-*.iml
-*.ipr
-
-# Sublime Text
-*.sublime-project
-*.sublime-workspace
-
-# Vim
-*.swp
-*.swo
-*~
-
-# Emacs
-*~
-\#*\#
-/.emacs.desktop
-/.emacs.desktop.lock
-*.elc
-auto-save-list
-tramp
-.\#*
-
-# =============================================================================
-# 🖥️ Operating System Files
-# =============================================================================
-# macOS
-.DS_Store
-.AppleDouble
-.LSOverride
-Icon
-._*
-.DocumentRevisions-V100
-.fseventsd
-.Spotlight-V100
-.TemporaryItems
-.Trashes
-.VolumeIcon.icns
-.com.apple.timemachine.donotpresent
-.AppleDB
-.AppleDesktop
-Network Trash Folder
-Temporary Items
-.apdisk
-
-# Windows
-Thumbs.db
-Thumbs.db:encryptable
-ehthumbs.db
-ehthumbs_vista.db
-*.tmp
-*.temp
-Desktop.ini
-$RECYCLE.BIN/
-*.cab
-*.msi
-*.msix
-*.msm
-*.msp
-*.lnk
-
-# Linux
-*~
-.fuse_hidden*
-.directory
-.Trash-*
-.nfs*
-
-# =============================================================================
-# 🌐 Web & Node.js (if you add frontend later)
-# =============================================================================
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.npm
-.eslintcache
-.parcel-cache
-
-# =============================================================================
-# 📦 Backup & Archive Files
-# =============================================================================
-*.backup
-*.bak
-*.orig
-*.save
-*.swp
-*.tmp
-*.zip
-*.tar.gz
-*.tar.bz2
-*.7z
-*.rar
-
-# =============================================================================
-# 🔧 Local Development Files
-# =============================================================================
-# Test files
-test_*.py
-*_test.py
-tests/local/
-temp/
-tmp/
-scratch/
-
-# Local configuration
-local_config.py
-development.py
-staging.py
-
-# Chrome extension temporary files
-extension/temp/
-chrome_extension_temp/
-
-# =============================================================================
-# 🚀 Deployment & Production Files
-# =============================================================================
-# Docker
-docker-compose.override.yml
-.dockerignore
-
-# Cloud & Deploy configs with secrets
-heroku.yml
-.vercel
-.netlify
-
-# SSL certificates
-*.crt
-*.csr
-
-# =============================================================================
-# 📊 Data Files (if they contain sensitive info)
-# =============================================================================
-data/
-datasets/
-*.csv
-*.json
-*.xlsx
-*.pdf
-uploads/
-downloads/
-
-# But allow sample/example data
-!example_data/
-!sample_data/
-!*_example.*
-!*_sample.*
-
-# =============================================================================
-# 🎯 Project Specific
-# =============================================================================
-# Resume files (if uploaded)
-resumes/
-resume_uploads/
-user_resumes/
-
-# Job data cache
-job_cache/
-cached_jobs/
-
-# AI model cache
-model_cache/
-.transformers_cache/
-.cache/
-
-# Test results
-test_results/
-benchmark_results/
-
-# =============================================================================
-# 📱 Chrome Extension Development
-# =============================================================================
-# Build artifacts
+extension/node_modules/
 extension/build/
 extension/dist/
-*.crx
-*.zip
+extension/.DS_Store
 
 # =============================================================================
-# 🔍 Monitoring & Analytics
+# 🖥️ Operating System Files (Basic)
 # =============================================================================
-# Error tracking
-sentry.properties
-bugsnag.properties
-
-# Analytics
-google-analytics.json
-mixpanel.json
+.DS_Store
+Thumbs.db
+*.tmp
+*.log
 
 # =============================================================================
-# ✅ SAFE FILES TO COMMIT (Examples)
+# 💾 IDE Files (Common ones)
 # =============================================================================
-# These are explicitly allowed:
-# README.md
-# requirements.txt
-# main_simple.py
-# .env.example (template without real keys)
-# setup.py
-# Dockerfile
-# docker-compose.yml (without secrets)
-# docs/
-# static/
-# templates/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# =============================================================================
+# 🎯 Project Specific (Optional - you can remove these)
+# =============================================================================
+# Resume uploads (if you add file upload feature)
+uploads/
+resumes/
+
+# Job data cache (if you cache job data)
+cached_jobs/
+
+# Test results
+test_results/ 
