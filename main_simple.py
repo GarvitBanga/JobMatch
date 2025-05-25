@@ -121,15 +121,29 @@ app = FastAPI(
 )
 
 # Add CORS middleware
-# Production CORS configuration
-allowed_origins = os.getenv("ALLOWED_ORIGINS", "chrome-extension://*,http://localhost:3000").split(",")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=allowed_origins,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["*"],
-)
+# Production CORS configuration for Chrome extensions
+allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "chrome-extension://*,http://localhost:3000")
+
+# Handle Chrome extension origins properly
+if "chrome-extension://*" in allowed_origins_env:
+    # Allow all origins for Chrome extensions (they use unique extension IDs)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],  # Chrome extensions need this
+        allow_credentials=False,  # Must be False when allow_origins=["*"]
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["*"],
+    )
+else:
+    # Use specific origins for other deployments
+    allowed_origins = allowed_origins_env.split(",")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["*"],
+    )
 
 # Pydantic models
 class ScanPageRequest(BaseModel):
