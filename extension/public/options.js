@@ -4,7 +4,7 @@ document.addEventListener('DOMContentLoaded', function() {
     loadSettings();
     setupEventListeners();
 });
-
+    
 function setupEventListeners() {
     // Settings form submission
     document.getElementById('settingsForm').addEventListener('submit', saveSettings);
@@ -24,7 +24,7 @@ async function loadSettings() {
         const settings = await chrome.storage.sync.get([
             'apiEndpoint',
             'matchThreshold', 
-            'autoScan',
+            'autoScan', 
             'resumeData',
             'resumeFileName',
             'resumeUploadDate',
@@ -32,7 +32,7 @@ async function loadSettings() {
         ]);
         
         // Populate form fields
-        document.getElementById('apiEndpoint').value = settings.apiEndpoint || 'http://localhost:8000/api/v1';
+        document.getElementById('apiEndpoint').value = settings.apiEndpoint || 'https://jobmatch-production.up.railway.app/api/v1';
         document.getElementById('matchThreshold').value = settings.matchThreshold || 70;
         document.getElementById('autoScan').checked = settings.autoScan || false;
         
@@ -76,7 +76,7 @@ async function resetSettings() {
         await chrome.storage.sync.clear();
         
         // Reset form to defaults
-        document.getElementById('apiEndpoint').value = 'http://localhost:8000/api/v1';
+        document.getElementById('apiEndpoint').value = 'https://jobmatch-production.up.railway.app/api/v1';
         document.getElementById('matchThreshold').value = 70;
         document.getElementById('autoScan').checked = false;
         document.getElementById('resumeFile').value = '';
@@ -96,7 +96,7 @@ async function resetSettings() {
 async function testConnection() {
     try {
         const settings = await chrome.storage.sync.get(['apiEndpoint']);
-        const apiEndpoint = settings.apiEndpoint || 'http://localhost:8000/api/v1';
+        const apiEndpoint = settings.apiEndpoint || 'https://jobmatch-production.up.railway.app/api/v1';
         
         showStatus('Testing connection...', 'info');
         
@@ -137,7 +137,7 @@ async function handleResumeUpload(event) {
         
         // Get API endpoint
         const settings = await chrome.storage.sync.get(['apiEndpoint']);
-        const apiEndpoint = settings.apiEndpoint || 'http://localhost:8000/api/v1';
+        const apiEndpoint = settings.apiEndpoint || 'https://jobmatch-production.up.railway.app/api/v1';
         
         // Create FormData for file upload
         const formData = new FormData();

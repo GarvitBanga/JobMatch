@@ -11,7 +11,7 @@
   "host_permissions": [
     "https://*/*",
     "http://*/*",
-    "http://localhost:8000/*",
+    "https://jobmatch-production.up.railway.app/*",
     "http://127.0.0.1:8000/*"
   ],
   "background": {
@@ -20,7 +20,7 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content-enhanced.js"],
+      "js": ["content.js"],
       "run_at": "document_end"
     }
   ],

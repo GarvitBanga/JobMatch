@@ -9,7 +9,7 @@ chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason === 'install') {
     // Set default settings
     chrome.storage.sync.set({
-      apiEndpoint: 'http://localhost:8000/api/v1',
+      apiEndpoint: 'https://jobmatch-production.up.railway.app/api/v1',
       autoScan: false,
       matchThreshold: 40
     });
@@ -35,6 +35,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
       return true;
       
+    case 'GET_LAST_RESULTS':
+      // 🚀 NEW: Get the last scan results from storage
+      chrome.storage.local.get(['lastScanResults', 'lastScanStatus'], (data) => {
+        sendResponse(data);
+      });
+      return true;
+      
+    case 'CLEAR_RESULTS':
+      // 🚀 NEW: Clear stored results
+      chrome.storage.local.remove(['lastScanResults', 'lastScanStatus'], () => {
+        sendResponse({ success: true });
+      });
+      return true;
+      
+    case 'HEALTH_CHECK':
+      // 🚀 NEW: Check if backend is available
+      checkBackendHealth(sendResponse);
+      return true;
+      
     default:
       console.log('Unknown message type:', message.type);
   }
@@ -52,7 +71,7 @@ async function handleScanPage(data, sendResponse) {
       'matchThreshold'
     ]);
     
-    const apiEndpoint = settings.apiEndpoint || 'http://localhost:8000/api/v1';
+    const apiEndpoint = settings.apiEndpoint || 'https://jobmatch-production.up.railway.app/api/v1';
     
     console.log('Scanning page:', url);
     console.log('Using API:', apiEndpoint);
@@ -63,12 +82,21 @@ async function handleScanPage(data, sendResponse) {
       hasJobs: !!pageContent.jobs?.length
     });
     
+    // 🚀 ENHANCED: Send immediate acknowledgment to prevent timeout
+    sendResponse({
+      success: true,
+      status: 'processing',
+      message: `Processing ${pageContent.jobElements?.length || 0} jobs... This may take up to 10 minutes for thorough AI analysis with Groq extraction + OpenAI matching.`,
+      progress: 0
+    });
+    
     // Prepare enhanced request data with resume information
     const requestData = {
       url: url,
       user_id: 'chrome-extension-user',
       page_content: pageContent,
       match_threshold: (settings.matchThreshold || 70) / 100, // Convert percentage to decimal
+      batch_processing: true,  // Enable batch processing for better results
       
       // Include structured resume data if available
       resume_data: settings.resumeData || null,
@@ -83,26 +111,39 @@ async function handleScanPage(data, sendResponse) {
       jobElementsCount: requestData.page_content.jobElements?.length || 0,
       jobLinksCount: requestData.page_content.jobLinks?.length || 0,
       matchThreshold: requestData.match_threshold,
+      batchProcessing: requestData.batch_processing,
       resumeDataAvailable: !!requestData.resume_data,
       resumeTextGenerated: !!requestData.resume_text
     });
     
+    // 🚀 ENHANCED: Create abort controller for timeout management
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      console.log('Request timeout - taking longer than expected, continuing in background');
+      controller.abort();
+    }, 600000); // 10 minutes timeout - for thorough job analysis
+    
     // Send enhanced request to backend API
     try {
+      console.log('🚀 Starting enhanced API request with 10-minute timeout...');
+      
       const response = await fetch(`${apiEndpoint}/scan/page`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(requestData)
+        body: JSON.stringify(requestData),
+        signal: controller.signal
       });
+      
+      clearTimeout(timeoutId);
       
       if (!response.ok) {
         throw new Error(`API request failed: ${response.status} ${response.statusText}`);
       }
       
       const result = await response.json();
-      console.log('API response summary:', {
+      console.log('✅ API response summary:', {
         success: result.success,
         matchesCount: result.matches?.length || 0,
         jobsFound: result.jobs_found,
@@ -110,24 +151,102 @@ async function handleScanPage(data, sendResponse) {
         processingTime: result.processing_time_ms
       });
       
-      // Enhanced response with processing method info
-      sendResponse({
-        success: result.success,
-        matches: result.matches || [],
-        message: result.message,
-        jobs_found: result.jobs_found,
-        processing_time: result.processing_time_ms,
-        processing_method: result.processing_method,
-        resume_used: !!settings.resumeData,
-        threshold_used: settings.matchThreshold || 70,
-        api_features: {
-          llm_matching: result.processing_method === 'llm',
-          resume_processing: !!settings.resumeData,
-          real_scoring: result.processing_method !== 'mock'
+      // 🚀 ENHANCED: Store results in local storage for persistence
+      await chrome.storage.local.set({
+        lastScanResults: {
+          url: url,
+          timestamp: Date.now(),
+          results: result,
+          settings: settings
         }
       });
       
+      // 🚀 ENHANCED: Send notification to popup if it's open
+      try {
+        console.log('🔍 DEBUG: About to send SCAN_COMPLETE message to popup...');
+        console.log('🔍 DEBUG: Result summary:', {
+          success: result.success,
+          matchesCount: result.matches?.length || 0,
+          processingMethod: result.processing_method
+        });
+        
+        const messageData = {
+          type: 'SCAN_COMPLETE',
+          data: {
+            success: result.success,
+            matches: result.matches || [],
+            message: result.message,
+            jobs_found: result.jobs_found,
+            processing_time: result.processing_time_ms,
+            processing_method: result.processing_method,
+            resume_used: result.resume_used
+          }
+        };
+        
+        // Store results for popup to retrieve
+        await chrome.storage.local.set({ 
+          pendingResults: messageData.data,
+          resultsTimestamp: Date.now()
+        });
+        console.log('✅ Results stored in chrome.storage.local');
+        
+        // Try to send message to popup (may fail if popup is closed)
+        try {
+          await chrome.runtime.sendMessage(messageData);
+          console.log('✅ Message sent to popup successfully');
+        } catch (messageError) {
+          console.log('ℹ️ Popup not available for direct message, results stored for retrieval');
+        }
+        
+        // Also try sending to all tabs (fallback)
+        const tabs = await chrome.tabs.query({});
+        for (const tab of tabs) {
+          try {
+            await chrome.tabs.sendMessage(tab.id, messageData);
+          } catch (tabError) {
+            // Ignore tab message errors
+          }
+        }
+        
+      } catch (error) {
+        console.error('❌ Error sending completion notification:', error);
+      }
+      
+      console.log('✅ Scan completed successfully with enhanced processing');
+      
     } catch (apiError) {
+      clearTimeout(timeoutId);
+      
+      if (apiError.name === 'AbortError') {
+        console.log('⏰ Request timeout - API is still processing, results may be available later');
+        
+        // Store timeout status
+        await chrome.storage.local.set({
+          lastScanStatus: {
+            url: url,
+            status: 'timeout',
+            message: 'Processing took longer than expected. Check backend logs for completion.',
+            timestamp: Date.now()
+          }
+        });
+        
+        // Try to notify popup about timeout
+        try {
+          await chrome.runtime.sendMessage({
+            type: 'SCAN_TIMEOUT',
+            data: {
+              url: url,
+              message: 'Processing is taking longer than expected. The backend is likely still working. Check the terminal logs.',
+              canRetry: true
+            }
+          });
+        } catch (notifyError) {
+          console.log('Popup not open to receive timeout notification');
+        }
+        
+        return;
+      }
+      
       console.error('API request failed:', apiError);
       
       // Enhanced fallback with resume awareness
@@ -150,18 +269,57 @@ async function handleScanPage(data, sendResponse) {
         }
       };
       
-      sendResponse(mockResponse);
+      // Store mock results
+      await chrome.storage.local.set({
+        lastScanResults: {
+          url: url,
+          timestamp: Date.now(),
+          results: mockResponse,
+          settings: settings
+        }
+      });
+      
+      // Send mock results notification
+      try {
+        await chrome.runtime.sendMessage({
+          type: 'SCAN_COMPLETE',
+          data: mockResponse
+        });
+      } catch (notifyError) {
+        console.log('Popup not open to receive mock results');
+      }
     }
     
   } catch (error) {
     console.error('Error scanning page:', error);
-    sendResponse({
+    
+    const errorResponse = {
       success: false,
       error: error.message,
       matches: [],
       message: 'Failed to scan page',
       processing_method: 'error'
+    };
+    
+    // Store error results
+    await chrome.storage.local.set({
+      lastScanResults: {
+        url: data.url,
+        timestamp: Date.now(),
+        results: errorResponse,
+        error: error.message
+      }
     });
+    
+    // Send error notification
+    try {
+      await chrome.runtime.sendMessage({
+        type: 'SCAN_ERROR',
+        data: errorResponse
+      });
+    } catch (notifyError) {
+      console.log('Popup not open to receive error notification');
+    }
   }
 }
 
@@ -377,4 +535,37 @@ function isCareerPage(url) {
   return careerKeywords.some(keyword => 
     url.toLowerCase().includes(keyword)
   );
+}
+
+// 🚀 NEW: Check backend health
+async function checkBackendHealth(sendResponse) {
+  try {
+    const settings = await chrome.storage.sync.get(['apiEndpoint']);
+    const apiEndpoint = settings.apiEndpoint || 'https://jobmatch-production.up.railway.app/api/v1';
+    
+    const response = await fetch(`${apiEndpoint.replace('/api/v1', '')}/health`, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+      }
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Health check failed: ${response.status}`);
+    }
+    
+    const result = await response.json();
+    sendResponse({
+      success: true,
+      health: result,
+      endpoint: apiEndpoint
+    });
+    
+  } catch (error) {
+    sendResponse({
+      success: false,
+      error: error.message,
+      endpoint: settings?.apiEndpoint || 'http://localhost:8000/api/v1'
+    });
+  }
 } 

@@ -192,7 +192,7 @@ class ResumeProcessor:
             Return only valid JSON, no explanations.
             """
             
-            response = await self.openai_client.chat.completions.create(
+            response = self.openai_client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[
                     {"role": "system", "content": "You are a resume parsing expert. Extract structured data from resumes and return only valid JSON."},
@@ -203,6 +203,26 @@ class ResumeProcessor:
             )
             
             json_str = response.choices[0].message.content
+            logger.info(f"🔍 OPENAI RAW RESPONSE: '{json_str}'")
+            logger.info(f"🔍 RESPONSE TYPE: {type(json_str)}")
+            logger.info(f"🔍 RESPONSE LENGTH: {len(json_str) if json_str else 0}")
+            
+            if not json_str or json_str.strip() == "":
+                logger.error("OpenAI returned empty response")
+                raise ValueError("Empty response from OpenAI")
+            
+            # 🚀 FIX: Strip markdown code block wrapper if present
+            json_str = json_str.strip()
+            if json_str.startswith("```json"):
+                json_str = json_str[7:]  # Remove ```json
+            if json_str.startswith("```"):
+                json_str = json_str[3:]   # Remove ```
+            if json_str.endswith("```"):
+                json_str = json_str[:-3]  # Remove trailing ```
+            json_str = json_str.strip()
+            
+            logger.info(f"🔍 CLEANED JSON: '{json_str[:200]}...'")
+            
             return json.loads(json_str)
             
         except Exception as e:
@@ -292,7 +312,7 @@ class ResumeProcessor:
             Return only valid JSON.
             """
             
-            response = await self.openai_client.chat.completions.create(
+            response = self.openai_client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[
                     {"role": "system", "content": "You are a career counselor and industry expert. Analyze resumes and provide detailed, actionable career insights based on current market trends."},
@@ -302,7 +322,28 @@ class ResumeProcessor:
                 max_tokens=1500
             )
             
-            insights = json.loads(response.choices[0].message.content)
+            raw_content = response.choices[0].message.content
+            logger.info(f"🔍 CAREER INSIGHTS RAW RESPONSE: '{raw_content}'")
+            logger.info(f"🔍 CAREER RESPONSE TYPE: {type(raw_content)}")
+            logger.info(f"🔍 CAREER RESPONSE LENGTH: {len(raw_content) if raw_content else 0}")
+            
+            if not raw_content or raw_content.strip() == "":
+                logger.error("OpenAI returned empty career insights response")
+                raise ValueError("Empty career insights response from OpenAI")
+            
+            # 🚀 FIX: Strip markdown code block wrapper if present
+            raw_content = raw_content.strip()
+            if raw_content.startswith("```json"):
+                raw_content = raw_content[7:]  # Remove ```json
+            if raw_content.startswith("```"):
+                raw_content = raw_content[3:]   # Remove ```
+            if raw_content.endswith("```"):
+                raw_content = raw_content[:-3]  # Remove trailing ```
+            raw_content = raw_content.strip()
+            
+            logger.info(f"🔍 CLEANED CAREER JSON: '{raw_content[:200]}...'")
+            
+            insights = json.loads(raw_content)
             
             # Add metadata
             insights["generated_at"] = json.dumps({"timestamp": "now"}),
@@ -559,9 +600,42 @@ class JobMatcher:
             
             resume_summary = f"""
             Skills: {', '.join(resume_data.get('skills', []))}
-            Experience: {len(resume_data.get('experience', []))} positions
-            {insights_summary}
-            """
+            
+            Experience ({len(resume_data.get('experience', []))} positions):"""
+            
+            # Add detailed experience information
+            for exp in resume_data.get('experience', [])[:3]:  # Top 3 experiences
+                title = exp.get('title') or 'N/A'
+                company = exp.get('company') or 'N/A'
+                duration = exp.get('duration') or 'N/A'
+                description = exp.get('description') or 'N/A'
+                technologies = exp.get('technologies') or []
+                
+                resume_summary += f"""
+            - {title} at {company} ({duration})
+              Description: {description[:200]}...
+              Technologies: {', '.join(technologies)}"""
+            
+            # Add project information
+            if resume_data.get('projects'):
+                resume_summary += f"""
+            
+            Key Projects ({len(resume_data.get('projects', []))}):")"""
+                for proj in resume_data.get('projects', [])[:3]:  # Top 3 projects
+                    proj_name = proj.get('name') or 'N/A'
+                    proj_desc = proj.get('description') or 'N/A'
+                    proj_tech = proj.get('technologies') or []
+                    
+                    resume_summary += f"""
+            - {proj_name}: {proj_desc[:150]}...
+              Technologies: {', '.join(proj_tech)}"""
+            
+            # Add career insights - ensure insights_summary is a string
+            insights_summary = insights_summary or ""
+            resume_summary += f"""
+            
+            Career Analysis:
+            {insights_summary}"""
             
             prompt = f"""
             Rate how well this resume matches this job posting, considering career insights.
@@ -586,7 +660,7 @@ class JobMatcher:
             Return only valid JSON.
             """
             
-            response = await self.openai_client.chat.completions.create(
+            response = self.openai_client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[
                     {"role": "system", "content": "You are an expert job-resume matcher with deep understanding of career progression and skill requirements."},
@@ -616,12 +690,14 @@ class JobMatcher:
         """Fallback similarity-based matching with improved scoring"""
         
         # Extract text from job
-        job_text = f"{job.get('title', '')} {job.get('description', '')} {job.get('company', '')}"
+        job_text = f"{job.get('title') or ''} {job.get('description') or ''} {job.get('company') or ''}"
         
-        # Extract text from resume
-        resume_text = f"{resume_data.get('summary', '')} {' '.join(resume_data.get('skills', []))}"
+        # Extract text from resume - ensure all values are strings
+        resume_text = f"{resume_data.get('summary') or ''} {' '.join(resume_data.get('skills', []))}"
         for exp in resume_data.get('experience', []):
-            resume_text += f" {exp.get('title', '')} {exp.get('description', '')}"
+            title = exp.get('title') or ''
+            description = exp.get('description') or ''
+            resume_text += f" {title} {description}"
         
         # Debug logging
         logger.info(f"Job matching debug - Job: {job.get('title', 'Unknown')}")
