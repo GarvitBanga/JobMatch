@@ -3,7 +3,7 @@
 Enhanced FastAPI server with resume processing and LLM integration
 """
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
@@ -13,10 +13,91 @@ import logging
 import requests
 from bs4 import BeautifulSoup
 import asyncio
+import json
+import re
+import time
+from datetime import datetime, timedelta
+from collections import defaultdict
+import traceback
 
 # Load environment variables from .env file
 from dotenv import load_dotenv
 load_dotenv()
+
+# 🚀 RATE LIMITING: Simple in-memory rate limiter
+class RateLimiter:
+    def __init__(self):
+        self.requests = defaultdict(list)  # {user_id: [timestamp1, timestamp2, ...]}
+        self.openai_requests = defaultdict(list)  # Separate tracking for OpenAI calls
+    
+    def is_allowed(self, user_id: str, max_requests: int = 50, window_hours: int = 24) -> bool:
+        """Check if user is within general rate limit"""
+        now = datetime.now()
+        cutoff = now - timedelta(hours=window_hours)
+        
+        # Clean old requests
+        self.requests[user_id] = [
+            req_time for req_time in self.requests[user_id] 
+            if req_time > cutoff
+        ]
+        
+        # Check if under limit
+        if len(self.requests[user_id]) >= max_requests:
+            return False
+        
+        # Record this request
+        self.requests[user_id].append(now)
+        return True
+    
+    def is_openai_allowed(self, user_id: str, max_openai_calls: int = 10, window_hours: int = 24) -> bool:
+        """Check if user is within OpenAI API call limit"""
+        now = datetime.now()
+        cutoff = now - timedelta(hours=window_hours)
+        
+        # Clean old OpenAI requests
+        self.openai_requests[user_id] = [
+            req_time for req_time in self.openai_requests[user_id] 
+            if req_time > cutoff
+        ]
+        
+        # Check if under OpenAI limit
+        if len(self.openai_requests[user_id]) >= max_openai_calls:
+            return False
+        
+        # Record this OpenAI request
+        self.openai_requests[user_id].append(now)
+        return True
+    
+    def get_usage_stats(self, user_id: str) -> Dict[str, Any]:
+        """Get current usage statistics for a user"""
+        now = datetime.now()
+        cutoff_24h = now - timedelta(hours=24)
+        cutoff_1h = now - timedelta(hours=1)
+        
+        # Count requests in last 24h and 1h
+        requests_24h = len([r for r in self.requests[user_id] if r > cutoff_24h])
+        requests_1h = len([r for r in self.requests[user_id] if r > cutoff_1h])
+        
+        openai_24h = len([r for r in self.openai_requests[user_id] if r > cutoff_24h])
+        openai_1h = len([r for r in self.openai_requests[user_id] if r > cutoff_1h])
+        
+        return {
+            "requests_last_24h": requests_24h,
+            "requests_last_hour": requests_1h,
+            "openai_calls_last_24h": openai_24h,
+            "openai_calls_last_hour": openai_1h,
+            "openai_limit_24h": 10,
+            "general_limit_24h": 50
+        }
+    
+    def record_openai_call(self, user_id: str) -> None:
+        """Record an OpenAI call for rate limiting purposes"""
+        now = datetime.now()
+        self.openai_requests[user_id].append(now)
+        logger.info(f"📊 Recorded OpenAI call for user {user_id}. Total today: {len(self.openai_requests[user_id])}")
+
+# Global rate limiter instance
+rate_limiter = RateLimiter()
 
 # Import our resume processing services
 try:
@@ -34,17 +115,19 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Bulk-Scanner Résumé Matcher API",
     description="Backend API for Chrome extension that matches job descriptions against résumés",
-    version="1.0.0",
+    version="1.0.1",
     docs_url="/docs",
     redoc_url="/redoc",
 )
 
 # Add CORS middleware
+# Production CORS configuration
+allowed_origins = os.getenv("ALLOWED_ORIGINS", "chrome-extension://*,http://localhost:3000").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for local development
+    allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -120,27 +203,76 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
-    return {
+    """Enhanced health check that includes LLM service status"""
+    try:
+        # Check basic app status
+        status = {
         "status": "healthy", 
-        "service": "bulk-scanner-api",
-        "features": {
-            "resume_processing": ResumeProcessor is not None,
-            "llm_matching": bool(os.getenv("OPENAI_API_KEY")),
-            "job_matching": JobMatcher is not None,
-            "extraction_methods": {
-                "groq_llama": bool(os.getenv("GROQ_API_KEY")),
-                "ollama_local": os.getenv("OLLAMA_AVAILABLE", "").lower() == "true",
-                "huggingface": bool(os.getenv("HUGGINGFACE_API_KEY")),
-                "smart_keyword": True  # Always available
-            }
-        },
-        "recommended_setup": {
-            "groq_api_key": "Get free key at https://console.groq.com/ (6,000 requests/day)",
-            "cost_per_50_jobs": "$0.02",
-            "extraction_quality": "groq > ollama > huggingface > smart_keyword"
+            "timestamp": time.time(),
+            "services": {}
         }
-    }
+        
+        # Check OpenAI availability
+        if os.getenv("OPENAI_API_KEY"):
+            status["services"]["openai"] = "available"
+        else:
+            status["services"]["openai"] = "not_configured"
+            
+        # Check Groq availability
+        if os.getenv("GROQ_API_KEY"):
+            status["services"]["groq"] = "available"
+        else:
+            status["services"]["groq"] = "not_configured"
+            
+        # Check Selenium WebDriver
+        try:
+            from selenium import webdriver
+            from selenium.webdriver.chrome.options import Options
+            chrome_options = Options()
+            chrome_options.add_argument("--headless")
+            chrome_options.add_argument("--no-sandbox")
+            chrome_options.add_argument("--disable-dev-shm-usage")
+            
+            # Quick test - don't actually create driver
+            status["services"]["selenium"] = "available"
+        except Exception as e:
+            status["services"]["selenium"] = f"error: {str(e)}"
+        
+        return status
+        
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.get("/api/v1/usage/{user_id}")
+async def get_user_usage(user_id: str, request: Request):
+    """
+    Check rate limiting status for a user
+    """
+    try:
+        client_ip = request.client.host
+        user_identifier = f"{user_id}_{client_ip}"
+        
+        usage_stats = rate_limiter.get_usage_stats(user_identifier)
+        
+        return {
+            "success": True,
+            "user_id": user_id,
+            "ip": client_ip,
+            "usage": usage_stats,
+            "limits": {
+                "general_requests_per_24h": 50,
+                "openai_calls_per_24h": 10
+            },
+            "remaining": {
+                "general_requests": max(0, 50 - usage_stats["requests_last_24h"]),
+                "openai_calls": max(0, 10 - usage_stats["openai_calls_last_24h"])
+            },
+            "reset_time": "24 hours from first request"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting usage stats: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error getting usage: {str(e)}")
 
 @app.post("/api/v1/upload/resume")
 async def upload_resume(
@@ -209,13 +341,35 @@ async def upload_resume(
         raise HTTPException(status_code=500, detail=f"Resume processing failed: {str(e)}")
 
 @app.post("/api/v1/scan/page", response_model=ScanPageResponse)
-async def scan_page_with_resume(request: ScanPageRequest):
+async def scan_page_with_resume(request: ScanPageRequest, http_request: Request):
     """
     Enhanced scan endpoint that supports both individual and batch processing
     """
     try:
         import time
         start_time = time.time()
+        
+        # 🚀 RATE LIMITING: Check if user is within limits
+        client_ip = http_request.client.host
+        user_identifier = f"{request.user_id}_{client_ip}"
+        
+        # Check general rate limit
+        if not rate_limiter.is_allowed(user_identifier, max_requests=50, window_hours=24):
+            usage_stats = rate_limiter.get_usage_stats(user_identifier)
+            logger.warning(f"🚫 Rate limit exceeded for user {user_identifier}: {usage_stats}")
+            raise HTTPException(
+                status_code=429, 
+                detail={
+                    "error": "Rate limit exceeded",
+                    "message": "You have exceeded the daily limit of 50 requests. Please try again tomorrow.",
+                    "usage": usage_stats,
+                    "retry_after": "24 hours"
+                }
+            )
+        
+        # Log rate limiting info
+        usage_stats = rate_limiter.get_usage_stats(user_identifier)
+        logger.info(f"🔒 Rate limit check passed for {user_identifier}: {usage_stats}")
         
         # Debug the request data
         logger.info(f"Request threshold: {request.match_threshold}")
@@ -255,13 +409,59 @@ async def scan_page_with_resume(request: ScanPageRequest):
         print("="*80 + "\n")
         
         # Check if we should use batch processing
-        if request.batch_processing and request.resume_data and len(jobs) > 3:
+        logger.info(f"🔍 ROUTE DEBUG: batch_processing={request.batch_processing}")
+        logger.info(f"🔍 ROUTE DEBUG: resume_data available={bool(request.resume_data)}")
+        logger.info(f"🔍 ROUTE DEBUG: jobs count={len(jobs)}")
+        logger.info(f"🔍 ROUTE DEBUG: len(jobs) > 3 = {len(jobs) > 3}")
+        
+        # 🚀 ENHANCED: More flexible batch processing conditions
+        should_use_batch = (
+            request.batch_processing and 
+            len(jobs) > 3 and
+            (
+                request.resume_data or  # Normal condition: has resume data
+                ('amazon.jobs' in request.url.lower() and len(jobs) >= 5)  # Special case: Amazon with 5+ jobs
+            )
+        )
+        
+        if should_use_batch:
             logger.info(f"🚀 Using batch processing for {len(jobs)} jobs")
+            logger.info(f"🔍 ROUTE DEBUG: CALLING BATCH_JOB_MATCHING")
+            
+            # Create resume data if missing (for Amazon Jobs fallback)
+            resume_data_for_batch = request.resume_data or {
+                "skills": ["JavaScript", "Python", "React", "AWS", "Node.js", "SQL", "Git", "Docker", "Kubernetes", "Java", "C++", "CSS"],
+                "experience": [
+                    {
+                        "title": "Software Engineer",
+                        "company": "Tech Company",
+                        "duration": "2+ years",
+                        "description": "Developed web applications using modern technologies",
+                        "technologies": ["JavaScript", "Python", "React", "AWS", "Node.js"]
+                    },
+                    {
+                        "title": "Junior Developer",
+                        "company": "Previous Company",
+                        "duration": "1 year",
+                        "description": "Built responsive web interfaces and APIs",
+                        "technologies": ["JavaScript", "React", "Node.js", "SQL"]
+                    }
+                ],
+                "education": [
+                    {
+                        "degree": "Bachelor's",
+                        "field": "Computer Science",
+                        "institution": "University",
+                        "year": "2020"
+                    }
+                ],
+                "summary": "Software engineer with experience in web development and cloud technologies, skilled in modern JavaScript frameworks and backend development"
+            }
             
             # Use the new batch matching endpoint internally
             batch_request = BatchJobMatchRequest(
                 jobs=jobs,
-                resume_data=request.resume_data,
+                resume_data=resume_data_for_batch,
                 user_id=request.user_id,
                 match_threshold=request.match_threshold,
                 max_results=15  # Return more results for better selection
@@ -271,6 +471,7 @@ async def scan_page_with_resume(request: ScanPageRequest):
             return await batch_job_matching(batch_request)
         
         # Fallback to original processing for smaller job sets or when batch is disabled
+        logger.info("🔍 ROUTE DEBUG: USING INDIVIDUAL PROCESSING (not batch)")
         logger.info("Using individual job processing")
         
         # Get job matcher
@@ -347,14 +548,24 @@ def extract_jobs_from_page_content(page_content: Dict[str, Any], url: str) -> Li
     logger.info(f"Page content received: {list(page_content.keys())}")
     logger.info(f"Page URL: {url}")
     
+    # 🚀 ENHANCED DEBUG: Print what's actually in the page content
+    logger.info(f"🔍 DEBUG: jobElements type: {type(page_content.get('jobElements'))}")
+    logger.info(f"🔍 DEBUG: jobElements value: {page_content.get('jobElements')}")
+    logger.info(f"🔍 DEBUG: jobLinks type: {type(page_content.get('jobLinks'))}")
+    logger.info(f"🔍 DEBUG: jobLinks value: {page_content.get('jobLinks')}")
+    
+    # 🎯 NEW: Detect embedded job board platforms
+    embedded_platform = detect_embedded_job_platform(url, page_content)
+    if embedded_platform:
+        logger.info(f"🔧 Detected embedded job platform: {embedded_platform}")
+    
     # Check for enhanced content script data
     jobs_found = []
     
     # Try new enhanced format first - prioritize jobElements with structure
-    if 'jobElements' in page_content and page_content['jobElements']:
-        logger.info("Found enhanced job data from content script")
-        job_elements = page_content['jobElements']
-        logger.info(f"Processing {len(job_elements)} job elements")
+    job_elements = page_content.get('jobElements')
+    if job_elements is not None and len(job_elements) > 0:
+        logger.info(f"Found enhanced job data from content script: {len(job_elements)} elements")
         
         for i, element in enumerate(job_elements):
             # Enhanced job elements have structured data
@@ -384,11 +595,13 @@ def extract_jobs_from_page_content(page_content: Dict[str, Any], url: str) -> Li
             else:
                 # Fallback for old format
                 logger.warning(f"Job element {i} is not a dict: {type(element)}")
+    else:
+        logger.warning(f"🔍 DEBUG: jobElements is None or empty: {job_elements}")
     
     # Fallback to jobLinks if no good jobElements
-    elif 'jobLinks' in page_content and page_content['jobLinks']:
-        logger.info("Using jobLinks as fallback")
-        job_links = page_content['jobLinks']
+    job_links = page_content.get('jobLinks')
+    if not jobs_found and job_links is not None and len(job_links) > 0:
+        logger.info(f"Using jobLinks as fallback: {len(job_links)} links")
         
         for i, link in enumerate(job_links):
             if isinstance(link, dict) and link.get('text'):
@@ -401,11 +614,232 @@ def extract_jobs_from_page_content(page_content: Dict[str, Any], url: str) -> Li
                     "description": link.get('text', '')
                 }
                 jobs_found.append(job)
+    else:
+        if not jobs_found:
+            logger.warning(f"🔍 DEBUG: jobLinks is None or empty: {job_links}")
                 
     # Final fallback to legacy format
-    elif 'jobs' in page_content and page_content['jobs']:
-        jobs_found = page_content['jobs']
+    legacy_jobs = page_content.get('jobs')
+    if not jobs_found and legacy_jobs is not None and len(legacy_jobs) > 0:
+        jobs_found = legacy_jobs
         logger.info(f"Using legacy jobs format: {len(jobs_found)} jobs")
+    else:
+        if not jobs_found:
+            logger.warning(f"🔍 DEBUG: legacy jobs is None or empty: {legacy_jobs}")
+    
+    # 🚀 If no jobs found at all, create a helpful debug response
+    if not jobs_found:
+        logger.error("🚨 NO JOBS FOUND IN PAGE CONTENT - Trying dynamic content extraction...")
+        
+        # 🎯 FIRST: Try to extract jobs from the Selenium-loaded content if available
+        page_text = page_content.get('text', '')
+        if page_text and len(page_text) > 1000:  # Substantial content loaded by Selenium
+            logger.info(f"🔍 Found substantial page content ({len(page_text)} characters) - parsing for job links...")
+            
+            # 🔍 DEBUG: Log a sample of the page content to see what we're working with
+            logger.info(f"🔍 DYNAMIC CONTENT SAMPLE (first 500 chars): {page_text[:500]}")
+            logger.info(f"🔍 CHECKING FOR ASHBY PATTERNS: ashby_jid in content: {'ashby_jid' in page_text.lower()}")
+            logger.info(f"🔍 CHECKING FOR JOB PATTERNS: 'job' in content: {'job' in page_text.lower()}")
+            
+            try:
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(page_text, 'html.parser')
+                
+                # 🔍 DEBUG: Check what links we can find
+                all_links = soup.find_all('a', href=True)
+                logger.info(f"🔍 TOTAL LINKS FOUND IN DYNAMIC CONTENT: {len(all_links)}")
+                
+                # Show first few links for debugging
+                for i, link in enumerate(all_links[:5]):
+                    href = link.get('href', '')
+                    title = link.get_text(strip=True)
+                    logger.info(f"🔍 Link {i+1}: href='{href}' title='{title}'")
+                
+                # Use our enhanced generic selectors on the Selenium-loaded content
+                logger.info("🔄 Applying enhanced job selectors to dynamic content...")
+                
+                # Enhanced generic job link selectors - same as in extract_generic_jobs_fallback
+                job_selectors = [
+                    # Traditional job URL patterns
+                    'a[href*="job"]', 'a[href*="position"]', 'a[href*="career"]',
+                    'a[href*="opening"]', 'a[href*="role"]', 'a[href*="opportunity"]',
+                    
+                    # Modern job board ID patterns (Ashby, Greenhouse, etc.)
+                    'a[href*="jid="]', 'a[href*="ashby_jid="]', 'a[href*="gh_jid="]',
+                    'a[href*="lever_id="]', 'a[href*="job_id="]', 'a[href*="posting_id="]',
+                    
+                    # CSS class patterns for job items
+                    'a[class*="job"]', 'a[class*="position"]', 'a[class*="career"]',
+                    'a[class*="posting"]', 'a[class*="opening"]', 'a[class*="role"]',
+                    
+                    # Ashby specific patterns (common class patterns)
+                    'a[class*="undecorated"]', 'a[class*="jobPosting"]', '.ashby-job-posting-brief a',
+                    'div[class*="jobPosting"] a', 'div[class*="job-posting"] a',
+                ]
+                
+                dynamic_jobs = []
+                for selector in job_selectors:
+                    job_links = soup.select(selector)
+                    if job_links:
+                        logger.info(f"✅ Found {len(job_links)} job links in dynamic content using selector: {selector}")
+                        
+                        for i, link in enumerate(job_links[:10]):  # Limit to first 10
+                            href = link.get('href', '')
+                            title = link.get_text(strip=True)
+                            
+                            # Enhanced URL validation
+                            if not href or not title or len(title) < 3:
+                                continue
+                            
+                            # Skip invalid URLs
+                            if (href.startswith('mailto:') or 
+                                href.startswith('tel:') or 
+                                href.startswith('#') or
+                                href == '/' or
+                                href == url):
+                                continue
+                            
+                            # Skip navigation titles
+                            title_lower = title.lower()
+                            skip_titles = ['home', 'about', 'contact', 'privacy', 'terms', 'login', 'sign up', 'search', 'filter']
+                            if any(skip_word in title_lower for skip_word in skip_titles) and len(title) < 30:
+                                continue
+                            
+                            # Make absolute URL
+                            if href.startswith('/'):
+                                job_url = url.rstrip('/') + href
+                            elif href.startswith('http'):
+                                job_url = href
+                            else:
+                                job_url = url.rstrip('/') + '/' + href
+                            
+                            dynamic_job = {
+                                "id": f"dynamic-{len(dynamic_jobs)+1}",
+                                "title": title[:100],
+                                "company": extract_company_from_url(url),
+                                "location": "Location TBD",
+                                "url": job_url,
+                                "description": f"Job found in dynamic content: {title}",
+                                "scraping_method": f"dynamic_content_{selector.replace('[', '').replace(']', '').replace('*', '')}",
+                                "platform": embedded_platform or "unknown"
+                            }
+                            dynamic_jobs.append(dynamic_job)
+                        
+                        if dynamic_jobs:
+                            break  # Stop at first successful selector
+                
+                if dynamic_jobs:
+                    logger.info(f"🎉 Successfully extracted {len(dynamic_jobs)} jobs from dynamic content!")
+                    jobs_found = dynamic_jobs
+                else:
+                    logger.warning("⚠️ No jobs found in dynamic content, falling back to direct scraping...")
+                    
+            except Exception as e:
+                logger.error(f"❌ Error parsing dynamic content: {str(e)}")
+        
+        # 🎯 FALLBACK: If dynamic content extraction failed, try direct scraping
+        if not jobs_found:
+            logger.warning("⚠️ Dynamic content extraction failed - trying direct page scraping...")
+            
+            # 🎯 ENHANCED: Platform-specific extraction strategies
+            if embedded_platform == 'ashby':
+                logger.info("🔧 Using Ashby-specific extraction strategy")
+                jobs_found = extract_ashby_jobs_fallback(url)
+            elif embedded_platform == 'greenhouse':
+                logger.info("🔧 Using Greenhouse-specific extraction strategy")
+                jobs_found = extract_greenhouse_jobs_fallback(url)
+            elif embedded_platform == 'lever':
+                logger.info("🔧 Using Lever-specific extraction strategy")
+                jobs_found = extract_lever_jobs_fallback(url)
+            elif embedded_platform == 'workday':
+                logger.info("🔧 Using Workday-specific extraction strategy")
+                jobs_found = extract_workday_jobs_fallback(url)
+            else:
+                # Generic fallback
+                jobs_found = extract_generic_jobs_fallback(url)
+    
+    # Final debug fallback if still no jobs
+    if not jobs_found:
+        logger.error("🚨 ALL EXTRACTION METHODS FAILED - Creating informational job")
+        
+        if embedded_platform:
+            debug_job = {
+                "id": "embedded-platform-1", 
+                "title": f"{embedded_platform.title()} Jobs Available",
+                "company": extract_company_from_url(url),
+                "location": "Various Locations",
+                "url": url,
+                "description": f"This site uses {embedded_platform.title()} job board platform which loads jobs dynamically. Please visit the site directly to see available positions, or try using the Chrome extension after the page fully loads."
+            }
+        else:
+            debug_job = {
+                "id": "debug-1", 
+                "title": "Debug: No Jobs Found",
+                "company": "JobMatch Debug",
+                "location": "Debug Mode",
+                "url": url,
+                "description": f"No jobs were extracted from the page content and direct scraping failed. Page content keys: {list(page_content.keys())}. This is a debug entry to help diagnose the issue."
+            }
+        jobs_found = [debug_job]
+    
+    # 🚀 SPECIAL CASE: Amazon Jobs requires Selenium for the search page itself
+    if 'amazon.jobs' in url.lower() and jobs_found and len(jobs_found) == 1 and jobs_found[0].get('id') == 'debug-1':
+        logger.info("🎯 Amazon Jobs detected with failed static extraction - trying Selenium for search page")
+        
+        try:
+            # Use Selenium to extract jobs directly from the Amazon search page
+            from selenium_job_extractor import fetch_job_selenium_implementation
+            
+            logger.info("🚀 Using Selenium for Amazon Jobs search page extraction")
+            
+            # Create a basic job object for the search page
+            search_page_job = {
+                "id": "amazon-search-page",
+                "title": "Amazon Jobs Search",
+                "company": "Amazon",
+                "location": "Various Locations",
+                "url": url,
+                "description": "Amazon Jobs search page"
+            }
+            
+            # Extract using Selenium
+            selenium_result = fetch_job_selenium_implementation(url, search_page_job)
+            
+            if selenium_result and selenium_result.get('description') and len(selenium_result.get('description', '')) > 500:
+                logger.info(f"✅ Selenium extraction successful for Amazon search: {len(selenium_result.get('description', ''))} characters")
+                
+                # If Selenium found job links, convert them to job objects
+                if selenium_result.get('job_links_found'):
+                    selenium_jobs = []
+                    for job_link in selenium_result['job_links_found'][:10]:  # Limit to 10
+                        selenium_job = {
+                            "id": f"selenium-amazon-{len(selenium_jobs)+1}",
+                            "title": job_link.get('title', 'Amazon Position'),
+                            "company": "Amazon",
+                            "location": "Location TBD",
+                            "url": job_link.get('url', url),
+                            "description": f"Amazon job: {job_link.get('title', 'Position')}. Individual job details available at job URL.",
+                            "extraction_method": "selenium_amazon_search",
+                            "full_details_fetched": False
+                        }
+                        selenium_jobs.append(selenium_job)
+                    
+                    if selenium_jobs:
+                        logger.info(f"🎉 Selenium found {len(selenium_jobs)} Amazon jobs from search page!")
+                        jobs_found = selenium_jobs
+                    else:
+                        # Use the search page result as a single job
+                        jobs_found = [selenium_result]
+                else:
+                    # Use the search page result as a single job
+                    jobs_found = [selenium_result]
+            else:
+                logger.warning("⚠️ Selenium extraction for Amazon search page returned minimal content")
+                
+        except ImportError:
+            logger.warning("📦 Selenium not available for Amazon Jobs extraction")
+        except Exception as e:
+            logger.error(f"❌ Selenium extraction failed for Amazon search page: {str(e)}")
     
     # 🚀 NEW: FETCH FULL JOB DESCRIPTIONS FROM INDIVIDUAL JOB PAGES
     if jobs_found:
@@ -415,7 +849,7 @@ def extract_jobs_from_page_content(page_content: Dict[str, Any], url: str) -> Li
         for i, job in enumerate(jobs_found):
             job_url = job.get('url', '')
             
-            # Skip if no valid URL
+            # Skip if no valid URL or same as base URL
             if not job_url or job_url == url:
                 logger.warning(f"Job {i+1}: No valid URL, using summary description")
                 enhanced_jobs.append(job)
@@ -424,97 +858,426 @@ def extract_jobs_from_page_content(page_content: Dict[str, Any], url: str) -> Li
             try:
                 logger.info(f"🔗 Fetching job {i+1}/{len(jobs_found)}: {job_url}")
                 
-                # Enhanced headers to bypass bot detection
-                headers = {
-                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.9',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'DNT': '1',
-                    'Connection': 'keep-alive',
-                    'Upgrade-Insecure-Requests': '1',
-                    'Sec-Fetch-Dest': 'document',
-                    'Sec-Fetch-Mode': 'navigate',
-                    'Sec-Fetch-Site': 'none',
-                    'Cache-Control': 'max-age=0'
-                }
+                # 🚀 ENHANCED: Try multiple fetching strategies for different site types
+                full_job_data = fetch_job_with_fallback_strategies(job_url, job)
                 
-                # Fetch the individual job page
-                import requests
-                from bs4 import BeautifulSoup
+                if full_job_data and full_job_data.get('description') and len(full_job_data.get('description', '')) > 100:
+                    # Successfully extracted meaningful content
+                    enhanced_job = {
+                        **job,
+                        "description": full_job_data.get('description', job.get('description', '')),
+                        "requirements": full_job_data.get('requirements', []),
+                        "qualifications": full_job_data.get('qualifications', []),
+                        "benefits": full_job_data.get('benefits', []),
+                        "salary": full_job_data.get('salary', ''),
+                        "job_type": full_job_data.get('job_type', ''),
+                        "posted_date": full_job_data.get('posted_date', ''),
+                        "full_details_fetched": True,
+                        "original_summary": job.get('description', ''),
+                        "extraction_method": full_job_data.get('extraction_method', 'enhanced_fetch'),
+                        "fetch_success": True
+                    }
+                    
+                    enhanced_jobs.append(enhanced_job)
+                    logger.info(f"✅ Job {i+1}: Successfully fetched {len(full_job_data.get('description', ''))} characters using {full_job_data.get('extraction_method', 'unknown')} method")
+                else:
+                    # Extraction failed, keep original data
+                    logger.warning(f"⚠️ Job {i+1}: Extraction returned minimal content, keeping original summary")
+                    job['full_details_fetched'] = False
+                    job['fetch_success'] = False
+                    job['extraction_method'] = 'failed_extraction'
+                    enhanced_jobs.append(job)
                 
-                response = requests.get(job_url, headers=headers, timeout=10)
-                response.raise_for_status()
-                
-                # Parse the job page
-                soup = BeautifulSoup(response.content, 'html.parser')
-                
-                # Extract full job details using the existing Amazon extraction logic
-                full_job_data = {
-                    "url": job_url,
-                    "title": job.get('title', ''),
-                    "company": job.get('company', 'Amazon'),
-                    "location": job.get('location', ''),
-                    "description": "",
-                    "extraction_method": "individual_page_fetch"
-                }
-                
-                # Use the existing Amazon job extraction function
-                full_job_data = extract_universal_job_content(soup, full_job_data)
-                
-                # Update the original job with full description
-                enhanced_job = {
-                    **job,
-                    "description": full_job_data.get('description', job.get('description', '')),
-                    "full_details_fetched": True,
-                    "original_summary": job.get('description', ''),  # Keep original summary for reference
-                }
-                
-                enhanced_jobs.append(enhanced_job)
-                logger.info(f"✅ Job {i+1}: Fetched {len(full_job_data.get('description', ''))} characters")
+                # Add delay to be respectful to servers
+                import time
+                time.sleep(0.5)  # 500ms delay between requests
                 
             except Exception as e:
                 logger.error(f"❌ Failed to fetch job {i+1} ({job_url}): {str(e)}")
                 # Keep original job data if fetch fails
                 job['full_details_fetched'] = False
                 job['fetch_error'] = str(e)
+                job['fetch_success'] = False
                 enhanced_jobs.append(job)
         
         logger.info(f"✅ Enhanced {len(enhanced_jobs)} jobs with full descriptions")
         return enhanced_jobs
     
-    # Generate mock jobs if no real jobs found
-    logger.info("No jobs found in any format, generating mock jobs for demo")
-    company_name = extract_company_from_url(url)
+    # Fallback if no jobs found at all
+    return jobs_found
+
+def fetch_job_with_fallback_strategies(job_url: str, basic_job: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Try multiple strategies to fetch job content from different types of sites
+    Handles both static HTML sites and JavaScript-heavy SPAs
+    """
     
-    mock_jobs = [
-        {
-            "id": "mock-1",
-            "title": "Senior Software Engineer",
-            "company": company_name,
-            "location": "San Francisco, CA",
-            "url": f"{url}#job-1",
-            "description": f"We are looking for a skilled software engineer to join {company_name}. You will work with modern technologies including React, Node.js, Python, and cloud platforms. This role offers opportunities to build scalable systems and work with a dynamic team on challenging technical problems."
-        },
-        {
-            "id": "mock-2", 
-            "title": "Full Stack Developer",
-            "company": company_name,
-            "location": "Remote",
-            "url": f"{url}#job-2",
-            "description": f"Join our engineering team at {company_name} to build modern web applications. We use JavaScript, Python, TypeScript, AWS, and Docker. Experience with databases, API design, and DevOps practices is highly valued. Great opportunity for growth and learning."
-        },
-        {
-            "id": "mock-3",
-            "title": "Frontend Developer",
-            "company": company_name,
-            "location": "New York, NY",
-            "url": f"{url}#job-3",
-            "description": f"Looking for a frontend developer skilled in React, TypeScript, and modern CSS frameworks. At {company_name}, you'll create beautiful user interfaces and work closely with design and backend teams to deliver exceptional user experiences."
-        }
+    # 🚀 GENERALIZED APPROACH: Try strategies in order for all sites
+    logger.info(f"🔄 Using generalized extraction strategy for: {job_url}")
+    
+    strategies = [
+        ("enhanced_static", fetch_job_static_enhanced),     # Try static first (fastest)
+        ("selenium_fallback", fetch_job_selenium_fallback), # Try Selenium for dynamic content
+        ("api_discovery", fetch_job_api_discovery)          # Try API discovery as last resort
     ]
     
-    return mock_jobs
+    for strategy_name, strategy_func in strategies:
+        try:
+            logger.info(f"🔄 Trying {strategy_name} for {job_url}")
+            result = strategy_func(job_url, basic_job)
+            
+            if result and result.get('description'):
+                description = result.get('description', '')
+                description_length = len(description)
+                
+                # Check if this is just a SPA detection message
+                is_spa_warning = (
+                    "JavaScript rendering" in description or
+                    "Limited content available through static extraction" in description or
+                    "Detected JavaScript SPA" in description
+                )
+                
+                # 🚀 GENERALIZED THRESHOLD: Accept results based on content quality
+                if strategy_name == "selenium_fallback" and description_length > 200:
+                    # Accept Selenium results with lower threshold (dynamic content)
+                    result['extraction_method'] = strategy_name
+                    logger.info(f"✅ {strategy_name} succeeded: {description_length} characters")
+                    return result
+                elif strategy_name != "selenium_fallback" and description_length > 500:
+                    # Higher threshold for static extraction
+                    result['extraction_method'] = strategy_name
+                    logger.info(f"✅ {strategy_name} succeeded: {description_length} characters")
+                    return result
+                elif is_spa_warning and strategy_name != "selenium_fallback":
+                    # If SPA detected, continue to Selenium
+                    logger.info(f"⚠️ {strategy_name} detected SPA, continuing to Selenium")
+                    continue
+                else:
+                    logger.info(f"⚠️ {strategy_name} returned insufficient content ({description_length} chars), trying next strategy")
+                    continue
+            else:
+                logger.info(f"⚠️ {strategy_name} returned no description, trying next strategy")
+        
+        except Exception as e:
+            logger.warning(f"❌ {strategy_name} failed: {str(e)}")
+            continue
+    
+    # All strategies failed, return basic job data
+    logger.error(f"❌ All extraction strategies failed for {job_url}")
+    return {
+        **basic_job,
+        "description": f"Unable to extract job details from {job_url}. This may be a JavaScript-heavy site.",
+        "extraction_method": "all_strategies_failed"
+    }
+
+def fetch_job_static_enhanced(job_url: str, basic_job: Dict[str, Any]) -> Dict[str, Any]:
+    """Enhanced static HTML fetching with better session handling and headers"""
+    
+    import requests
+    from bs4 import BeautifulSoup
+    
+    # Create session with enhanced headers
+    session = requests.Session()
+    
+    # Mimic a real browser more closely
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'same-origin',
+        'Sec-Fetch-User': '?1',
+        'Cache-Control': 'max-age=0',
+        'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"macOS"'
+    }
+    
+    session.headers.update(headers)
+    
+    # Make request with session
+    response = session.get(job_url, timeout=15, allow_redirects=True)
+    response.raise_for_status()
+    
+    # Parse response
+    soup = BeautifulSoup(response.content, 'html.parser')
+    
+    # Initialize job data structure
+    job_data = {
+        "url": job_url,
+        "title": basic_job.get('title', ''),
+        "company": basic_job.get('company', ''),
+        "location": basic_job.get('location', ''),
+        "description": "",
+        "requirements": [],
+        "qualifications": [],
+        "benefits": [],
+        "salary": "",
+        "job_type": "",
+        "posted_date": "",
+        "application_deadline": "",
+        "extraction_method": "enhanced_static"
+    }
+    
+    # Detect site type and use appropriate extraction
+    job_url_lower = job_url.lower()
+    
+    if 'myworkdayjobs.com' in job_url_lower or 'workday' in job_url_lower:
+        logger.info("🔧 Detected Workday site - using enhanced Workday extraction")
+        job_data = extract_workday_job_enhanced(soup, job_data)
+        
+    elif 'greenhouse.io' in job_url_lower or 'grnh.se' in job_url_lower:
+        logger.info("🔧 Detected Greenhouse site - using Greenhouse extraction")
+        job_data = extract_greenhouse_job(soup, job_data)
+        
+    elif 'jobs.lever.co' in job_url_lower:
+        logger.info("🔧 Detected Lever site - using Lever extraction")
+        job_data = extract_lever_job(soup, job_data)
+        
+    elif 'bamboohr.com' in job_url_lower:
+        logger.info("🔧 Detected BambooHR site - using BambooHR extraction")
+        job_data = extract_bamboohr_job(soup, job_data)
+        
+    elif 'amazon.jobs' in job_url_lower:
+        logger.info("🔧 Detected Amazon Jobs - using Amazon extraction")
+        job_data = extract_amazon_job(soup, job_data)
+        
+    elif 'careers.db.com' in job_url_lower or 'deutsche-bank' in job_url_lower:
+        logger.info("🔧 Detected Deutsche Bank careers site - using Deutsche Bank extraction")
+        job_data = extract_deutsche_bank_job(soup, job_data, job_url)
+        
+        # Check if we got a short description (likely dynamic content not loaded)
+        if len(job_data.get('description', '')) < 100:
+            logger.warning(f"⚠️ Short description detected ({len(job_data.get('description', ''))} chars), retrying with Selenium")
+            # Use Selenium for Deutsche Bank jobs
+            from selenium_job_extractor import SeleniumJobExtractor
+            extractor = SeleniumJobExtractor(headless=True)
+            try:
+                # Ensure we have a valid job URL
+                if '#/professional/job/' in job_url:
+                    job_id = job_url.split('/job/')[-1]
+                    base_url = 'https://careers.db.com/professionals/search-roles/'
+                    job_url = f"{base_url}#/professional/job/{job_id}"
+                    logger.info(f"🔗 Using full Deutsche Bank URL: {job_url}")
+                
+                job_data = extractor.extract_deutsche_bank_job_selenium(job_url, basic_job)
+                
+                # Verify we got a substantial description
+                if len(job_data.get('description', '')) < 100:
+                    logger.warning("⚠️ Selenium extraction still got short description, retrying with longer wait")
+                    # Retry with longer wait
+                    extractor.driver.set_page_load_timeout(30)
+                    job_data = extractor.extract_deutsche_bank_job_selenium(job_url, basic_job)
+            finally:
+                extractor.close()
+    else:
+        logger.info("🔧 Using generic extraction for unknown site")
+        job_data = extract_generic_job_enhanced(soup, job_data)
+    
+    # Post-process and clean up the job data
+    job_data = clean_job_data(job_data)
+    
+    return job_data
+
+def fetch_job_api_discovery(job_url: str, basic_job: Dict[str, Any]) -> Dict[str, Any]:
+    """Try to discover and use internal APIs for job content"""
+    
+    import requests
+    import json
+    import re
+    
+    # For Workday sites, try to find the API endpoints
+    if 'myworkdayjobs.com' in job_url.lower() or 'workday' in job_url.lower():
+        try:
+            # Extract job ID from URL
+            job_id_match = re.search(r'_([^_]+)$', job_url)
+            if job_id_match:
+                job_id = job_id_match.group(1)
+                
+                # Try common Workday API patterns
+                base_url = job_url.split('/job/')[0]
+                api_endpoints = [
+                    f"{base_url}/jobDetail/en-US/{job_id}",
+                    f"{base_url}/api/v1/jobs/{job_id}",
+                    f"{base_url}/job/{job_id}/details"
+                ]
+                
+                headers = {
+                    'Accept': 'application/json',
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+                }
+                
+                for api_url in api_endpoints:
+                    try:
+                        response = requests.get(api_url, headers=headers, timeout=10)
+                        if response.status_code == 200 and 'application/json' in response.headers.get('content-type', ''):
+                            data = response.json()
+                            
+                            # Extract job details from API response
+                            job_data = extract_workday_api_data(data, basic_job, job_url)
+                            if job_data.get('description') and len(job_data.get('description', '')) > 100:
+                                logger.info(f"✅ Found Workday API data: {len(job_data.get('description', ''))} characters")
+                                return job_data
+                    except:
+                        continue
+        except Exception as e:
+            logger.warning(f"Workday API discovery failed: {str(e)}")
+    
+    # Return empty result if API discovery fails
+    return {}
+
+def fetch_job_selenium_fallback(job_url: str, basic_job: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Selenium fallback for JavaScript-heavy sites
+    """
+    
+    try:
+        # Try to import and use the Selenium extractor
+        from selenium_job_extractor import fetch_job_selenium_implementation
+        
+        logger.info("🚀 Using Selenium WebDriver for JavaScript content")
+        result = fetch_job_selenium_implementation(job_url, basic_job)
+        
+        if result and result.get('description') and len(result.get('description', '')) > 100:
+            logger.info(f"✅ Selenium extraction successful: {len(result.get('description', ''))} characters")
+            return result
+        else:
+            logger.warning("⚠️ Selenium extraction returned minimal content")
+            return {}
+    
+    except ImportError:
+        logger.info("📦 Selenium not installed - skipping WebDriver extraction")
+        logger.info("💡 Install with: pip install selenium")
+        return {}
+    
+    except Exception as e:
+        logger.error(f"❌ Selenium extraction failed: {str(e)}")
+        return {}
+
+def extract_workday_job_enhanced(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, Any]:
+    """Enhanced Workday extraction that handles both static and dynamic content indicators"""
+    
+    try:
+        logger.info(f"🔍 Enhanced Workday extraction for: {job.get('url', 'Unknown URL')}")
+        
+        # Check if this is a SPA (Single Page Application)
+        page_text = soup.get_text()
+        is_spa = (
+            len(page_text.strip()) < 500 or  # Very little text content
+            soup.find('div', {'id': 'root'}) or soup.find('div', {'id': 'app'}) or  # SPA indicators
+            len(soup.find_all('script')) > 5  # Heavy JavaScript
+        )
+        
+        if is_spa:
+            logger.warning("⚠️ Detected JavaScript SPA - static extraction will have limited success")
+            job["description"] = f"This Workday job posting uses JavaScript rendering. Limited content available through static extraction. Job URL: {job.get('url', '')}"
+            job["extraction_method"] = "spa_limited"
+            return job
+        
+        # Continue with standard Workday extraction for static content
+        return extract_workday_job(soup, job)
+        
+    except Exception as e:
+        logger.error(f"Enhanced Workday extraction failed: {str(e)}")
+        job["description"] = f"Enhanced Workday extraction error: {str(e)}"
+        return job
+
+def extract_generic_job_enhanced(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, Any]:
+    """Enhanced generic extraction with better content detection"""
+    
+    try:
+        # Use the existing universal extraction but with enhanced error handling
+        job = extract_universal_job_content(soup, job, "enhanced_generic")
+        
+        # If extraction failed, try alternative approaches
+        if not job.get("description") or len(job.get("description", "")) < 100:
+            logger.info("🔄 Primary extraction yielded minimal content, trying alternative methods")
+            
+            # Try to extract from meta tags
+            meta_desc = soup.find('meta', {'name': 'description'})
+            if meta_desc and meta_desc.get('content'):
+                job["description"] = f"Job Summary: {meta_desc.get('content')}"
+                logger.info("✅ Extracted content from meta description")
+            
+            # Try structured data (JSON-LD)
+            json_ld_scripts = soup.find_all('script', {'type': 'application/ld+json'})
+            for script in json_ld_scripts:
+                try:
+                    import json
+                    data = json.loads(script.string)
+                    if data.get('@type') == 'JobPosting':
+                        description = data.get('description', '')
+                        if description and len(description) > 100:
+                            job["description"] = f"Job Posting: {description}"
+                            logger.info("✅ Extracted content from JSON-LD structured data")
+                            break
+                except:
+                    continue
+        
+        return job
+        
+    except Exception as e:
+        logger.error(f"Enhanced generic extraction failed: {str(e)}")
+        job["description"] = f"Enhanced generic extraction error: {str(e)}"
+        return job
+
+def extract_workday_api_data(api_data: Dict, basic_job: Dict[str, Any], job_url: str) -> Dict[str, Any]:
+    """Extract job data from Workday API response"""
+    
+    try:
+        job_data = {
+            **basic_job,
+            "url": job_url,
+            "extraction_method": "workday_api"
+        }
+        
+        # Common Workday API field mappings
+        if isinstance(api_data, dict):
+            # Title
+            title_fields = ['title', 'jobTitle', 'positionTitle', 'name']
+            for field in title_fields:
+                if api_data.get(field):
+                    job_data["title"] = api_data[field]
+                    break
+            
+            # Description
+            desc_fields = ['description', 'jobDescription', 'summary', 'details']
+            for field in desc_fields:
+                if api_data.get(field):
+                    job_data["description"] = api_data[field]
+                    break
+            
+            # Location
+            location_fields = ['location', 'jobLocation', 'address']
+            for field in location_fields:
+                if api_data.get(field):
+                    if isinstance(api_data[field], dict):
+                        # Handle nested location objects
+                        city = api_data[field].get('city', '')
+                        state = api_data[field].get('state', '')
+                        country = api_data[field].get('country', '')
+                        job_data["location"] = f"{city}, {state}, {country}".strip(', ')
+                    else:
+                        job_data["location"] = str(api_data[field])
+                    break
+            
+            # Company
+            company_fields = ['company', 'employer', 'organization']
+            for field in company_fields:
+                if api_data.get(field):
+                    job_data["company"] = api_data[field]
+                    break
+        
+        return job_data
+        
+    except Exception as e:
+        logger.error(f"Error parsing Workday API data: {str(e)}")
+        return basic_job
 
 def extract_company_from_url(url: str) -> str:
     """Extract company name from URL"""
@@ -656,6 +1419,10 @@ async def fetch_job_details(
         elif 'amazon.jobs' in job_url_lower:
             logger.info("Detected Amazon Jobs - using Amazon extraction")
             job = extract_amazon_job(soup, job)
+            
+        elif 'careers.db.com' in job_url_lower or 'deutsche-bank' in job_url_lower:
+            logger.info("Detected Deutsche Bank careers site - using Deutsche Bank extraction")
+            job = extract_deutsche_bank_job(soup, job, job_url)
             
         else:
             logger.info("Using generic extraction for unknown site")
@@ -990,15 +1757,18 @@ def extract_universal_job_content(soup: BeautifulSoup, job: Dict[str, Any], site
     return job
 
 def extract_workday_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract job details from Workday sites using universal extraction"""
+    """Extract job details from Workday sites with enhanced selectors and content extraction"""
     
     try:
+        logger.info(f"🔍 Extracting Workday job from: {job.get('url', 'Unknown URL')}")
+        
         # Enhanced title extraction for Workday
         title_selectors = [
             '[data-automation-id="jobPostingHeader"]',
             'h1[data-automation-id]',
             'h1.gwt-Label',
             '.css-12za9md',
+            '.PXFDHSMLXB',  # Common Workday class
             'h1'
         ]
         
@@ -1006,12 +1776,15 @@ def extract_workday_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, A
             title_el = soup.select_one(selector)
             if title_el and title_el.get_text().strip():
                 job["title"] = title_el.get_text().strip()
+                logger.info(f"✅ Found title: {job['title']}")
                 break
         
         # Enhanced company extraction for Workday
         company_selectors = [
             '[data-automation-id="breadcrumb"] span',
             '.css-1c6k6o1',
+            '[data-automation-id="companyNameText"]',
+            '.PXFDHSMLXB .PAFDHCMLXB',  # Nested Workday classes
             'title'
         ]
         
@@ -1019,25 +1792,166 @@ def extract_workday_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, A
             company_el = soup.select_one(selector)
             if company_el and company_el.get_text().strip():
                 company_text = company_el.get_text().strip()
-                if 'careers' not in company_text.lower():
-                    job["company"] = company_text.split('-')[0].strip()
+                if 'careers' not in company_text.lower() and 'jobs' not in company_text.lower():
+                    job["company"] = company_text.split('-')[0].split('|')[0].strip()
+                    logger.info(f"✅ Found company: {job['company']}")
                     break
         
         # Enhanced location extraction for Workday
         location_selectors = [
             '[data-automation-id="locations"]',
+            '[data-automation-id="jobPostingHeaderSubtitle"]',
             '.css-1t6zqoe',
-            '[data-automation-id="jobPostingHeaderSubtitle"]'
+            '.PAFDHGMLXB',  # Workday location class
+            '.jobPostingHeaderSubtitle'
         ]
         
         for selector in location_selectors:
             location_el = soup.select_one(selector)
             if location_el and location_el.get_text().strip():
                 job["location"] = location_el.get_text().strip()
+                logger.info(f"✅ Found location: {job['location']}")
                 break
         
-        # Use universal content extraction
+        # 🚀 ENHANCED: Workday-specific job description extraction
+        description_parts = []
+        
+        # Primary Workday content selectors (ordered by priority)
+        workday_content_selectors = [
+            '[data-automation-id="jobPostingDescription"]',
+            '[data-automation-id="jobPostingDescriptionText"]',
+            '.css-1nqz5j',  # Common Workday description container
+            '.PACDKGMLXB',  # Workday content class
+            '.jobDescription',
+            '.Job_Description',
+            '.wd-text',
+            '.gwt-RichTextArea',
+            '.rich-text-content'
+        ]
+        
+        logger.info("🔍 Searching for job description with Workday selectors...")
+        
+        for selector in workday_content_selectors:
+            elements = soup.select(selector)
+            logger.info(f"Selector '{selector}' found {len(elements)} elements")
+            
+            for element in elements:
+                content = element.get_text(separator='\n', strip=True)
+                if content and len(content) > 100:  # Substantial content
+                    description_parts.append(f"Job Description:\n{content}")
+                    logger.info(f"✅ Found substantial content: {len(content)} characters using selector '{selector}'")
+                    break
+            
+            if description_parts:  # Stop at first substantial match
+                break
+        
+        # 🔧 ENHANCED: Additional Workday content patterns
+        if not description_parts:
+            logger.info("🔍 Trying alternative Workday content extraction patterns...")
+            
+            # Look for sections with specific text patterns
+            content_keywords = [
+                'job responsibilities', 'what you\'ll do', 'role description',
+                'key responsibilities', 'your role', 'about this job',
+                'job summary', 'position summary', 'what we\'re looking for',
+                'requirements', 'qualifications', 'skills needed'
+            ]
+            
+            all_elements = soup.find_all(['div', 'section', 'p'], string=True)
+            
+            for element in all_elements:
+                text = element.get_text().lower()
+                if any(keyword in text for keyword in content_keywords):
+                    # Found a section with job-related content
+                    parent = element.find_parent(['div', 'section'])
+                    if parent:
+                        content = parent.get_text(separator='\n', strip=True)
+                        if len(content) > 200:  # Substantial content
+                            description_parts.append(f"Job Information:\n{content}")
+                            logger.info(f"✅ Found job content via keyword matching: {len(content)} characters")
+                            break
+        
+        # 🔧 FALLBACK: Extract from main content areas
+        if not description_parts:
+            logger.info("🔍 Using fallback content extraction for Workday...")
+            
+            # Look for main content containers
+            main_selectors = [
+                'main',
+                '[role="main"]',
+                '.main-content',
+                '.content',
+                '#content',
+                '.job-content',
+                '.posting-content'
+            ]
+            
+            for selector in main_selectors:
+                main_el = soup.select_one(selector)
+                if main_el:
+                    # Extract meaningful paragraphs and divs
+                    content_elements = main_el.find_all(['p', 'div', 'li'], string=True)
+                    meaningful_content = []
+                    
+                    for elem in content_elements:
+                        text = elem.get_text(strip=True)
+                        if (len(text) > 50 and 
+                            not text.lower().startswith(('cookie', 'privacy', 'javascript', 'terms')) and
+                            'apply' not in text.lower()[:20]):  # Skip apply buttons
+                            meaningful_content.append(text)
+                    
+                    if meaningful_content:
+                        combined_content = '\n\n'.join(meaningful_content)
+                        if len(combined_content) > 200:
+                            description_parts.append(f"Job Content:\n{combined_content}")
+                            logger.info(f"✅ Found content via main container: {len(combined_content)} characters")
+                            break
+        
+        # Combine all description parts
+        if description_parts:
+            job["description"] = "\n\n".join(description_parts)
+        else:
+            # Last resort: use universal extraction
+            logger.warning("🚨 All Workday-specific extraction failed, falling back to universal extraction")
         job = extract_universal_job_content(soup, job, "workday")
+        
+        # Extract additional Workday-specific fields
+        
+        # Job type extraction
+        job_type_selectors = [
+            '[data-automation-id="jobClassification"]',
+            '.job-type',
+            '.employment-type'
+        ]
+        
+        for selector in job_type_selectors:
+            type_el = soup.select_one(selector)
+            if type_el:
+                job["job_type"] = type_el.get_text(strip=True)
+                break
+        
+        # Posted date extraction
+        date_selectors = [
+            '[data-automation-id="postedOn"]',
+            '.posted-date',
+            '.date-posted'
+        ]
+        
+        for selector in date_selectors:
+            date_el = soup.select_one(selector)
+            if date_el:
+                job["posted_date"] = date_el.get_text(strip=True)
+                break
+        
+        # Ensure we have a reasonable description
+        if not job.get("description") or len(job["description"]) < 50:
+            job["description"] = "Job details not available from this Workday page"
+        
+        # Limit description length for processing efficiency
+        if len(job["description"]) > 8000:
+            job["description"] = job["description"][:8000] + "\n\n[Content truncated for processing efficiency]"
+        
+        logger.info(f"📄 Workday extraction complete: {len(job['description'])} characters for '{job.get('title', 'Unknown')}'")
         
     except Exception as e:
         logger.error(f"Error extracting Workday job: {str(e)}")
@@ -1175,38 +2089,109 @@ def extract_amazon_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, An
     """Extract job details from Amazon Jobs using universal extraction (enhanced)"""
     
     try:
-        # Enhanced title extraction for Amazon
-        title_selectors = [
-            'h1.header-module_title__3cOil',
-            'h1[data-test-id="header-title"]',
-            'h1',
-            'h2'
-        ]
+        # 🚀 ENHANCED: Extract title from URL first (more reliable for Amazon)
+        job_url = job.get('url', '')
+        if job_url and '/jobs/' in job_url:
+            # Parse title from Amazon URL structure
+            # URL format: https://www.amazon.jobs/en/jobs/ID/job-title-slug
+            url_parts = job_url.split('/')
+            if len(url_parts) >= 6:
+                title_slug = url_parts[-1]  # Last part is usually the job title slug
+                if title_slug and title_slug != job_url.split('/')[-2]:  # Not just the ID
+                    # Convert slug to proper title
+                    title_from_url = title_slug.replace('-', ' ').title()
+                    if len(title_from_url) > 5 and not title_from_url.isdigit():
+                        job["title"] = title_from_url
+                        logger.info(f"📋 Extracted title from URL: {title_from_url}")
         
-        for selector in title_selectors:
-            title_el = soup.select_one(selector)
-            if title_el and title_el.get_text().strip():
-                job["title"] = title_el.get_text().strip()
-                break
+        # Enhanced title extraction for Amazon (fallback)
+        if not job.get("title") or len(job.get("title", "")) < 5:
+            title_selectors = [
+                'h1.header-module_title__3cOil',
+                'h1[data-test-id="header-title"]',
+                '.job-title h1',
+                '.posting-title',
+                'h1',
+                'h2'
+            ]
+            
+            for selector in title_selectors:
+                title_el = soup.select_one(selector)
+                if title_el and title_el.get_text().strip():
+                    title_text = title_el.get_text().strip()
+                    # Avoid posting dates and navigation text
+                    if (not title_text.lower().startswith('posted') and
+                        'amazon.jobs' not in title_text.lower() and
+                        len(title_text) > 10):
+                        job["title"] = title_text
+                        logger.info(f"📋 Extracted title from page: {title_text}")
+                        break
         
-        # Company
+        # Company is always Amazon
         job["company"] = "Amazon"
         
         # Enhanced location extraction for Amazon
         location_selectors = [
             '[data-test-id="header-location"]',
             '.header-module_location__2P5bY',
-            '.location'
+            '.location',
+            '.job-location',
+            '.posting-location'
         ]
         
         for selector in location_selectors:
             location_el = soup.select_one(selector)
             if location_el and location_el.get_text().strip():
-                job["location"] = location_el.get_text().strip()
+                location_text = location_el.get_text().strip()
+                # Clean up location text
+                if 'location' not in location_text.lower():
+                    job["location"] = location_text
+                    logger.info(f"📍 Found location: {location_text}")
+                    break
+        
+        # 🚀 ENHANCED: Try to extract location from job description if not found
+        if not job.get("location") or job.get("location") == "Location":
+            full_text = soup.get_text()
+            # Look for location patterns in the text
+            import re
+            location_patterns = [
+                r'Location[:\s]+([^.\n]+)',
+                r'Based in ([^.\n]+)',
+                r'([A-Z][a-z]+,\s*[A-Z]{2,})',  # City, State format
+                r'([A-Z][a-z]+,\s*[A-Z][a-z]+)',  # City, Country format
+            ]
+            
+            for pattern in location_patterns:
+                matches = re.findall(pattern, full_text)
+                if matches:
+                    location = matches[0].strip()
+                    if len(location) > 2 and len(location) < 50:
+                        job["location"] = location
+                        logger.info(f"📍 Extracted location from text: {location}")
                 break
         
         # Use universal content extraction
         job = extract_universal_job_content(soup, job, "amazon")
+        
+        # 🚀 FINAL CLEANUP: Ensure we have at least basic job information
+        if not job.get("title") or job.get("title") in ["Job Position", "Unknown Title"]:
+            # Last resort: try to extract from page title
+            page_title = soup.find('title')
+            if page_title and page_title.get_text():
+                title_text = page_title.get_text().strip()
+                # Clean up page title
+                title_parts = title_text.split(' - ')
+                if len(title_parts) > 1:
+                    potential_title = title_parts[0].strip()
+                    if (len(potential_title) > 10 and 
+                        not potential_title.lower().startswith('posted') and
+                        'amazon' not in potential_title.lower()):
+                        job["title"] = potential_title
+                        logger.info(f"📋 Extracted title from page title: {potential_title}")
+        
+        # Set default location if still empty
+        if not job.get("location") or job.get("location") in ["Location", ""]:
+            job["location"] = "Various Locations"
         
     except Exception as e:
         logger.error(f"Error extracting Amazon job: {str(e)}")
@@ -1299,14 +2284,16 @@ def detect_site_type(url: str) -> str:
         return 'bamboohr'
     elif 'amazon.jobs' in url_lower:
         return 'amazon'
+    elif 'careers.db.com' in url_lower or 'deutsche-bank' in url_lower:
+        return 'deutsche_bank'
     else:
         return 'generic'
 
 @app.post("/api/v1/match/batch", response_model=ScanPageResponse)
 async def batch_job_matching(request: BatchJobMatchRequest):
     """
-    Batch job matching endpoint - sends all jobs to OpenAI in a single API call
-    This is much more cost-effective than individual job analysis
+    🎯 FIXED: Batch job matching endpoint that PRIORITIZES OpenAI scoring over similarity
+    Ensures consistent, realistic match scores from OpenAI rather than inflated similarity scores
     """
     try:
         import time
@@ -1314,31 +2301,60 @@ async def batch_job_matching(request: BatchJobMatchRequest):
         
         logger.info(f"🔄 Batch matching {len(request.jobs)} jobs for user {request.user_id}")
         
+        # 🚀 RATE LIMITING: Check OpenAI-specific rate limit
+        user_identifier = f"{request.user_id}_batch"
+        
         # Check if we have OpenAI API key for intelligent matching
         openai_api_key = os.getenv("OPENAI_API_KEY")
         
+        # 🔍 DEBUG: Add extensive logging
+        logger.info(f"🔍 BATCH DEBUG: OpenAI API key available: {bool(openai_api_key)}")
+        logger.info(f"🔍 BATCH DEBUG: Number of jobs: {len(request.jobs)}")
+        logger.info(f"🔍 BATCH DEBUG: User identifier: {user_identifier}")
+        
+        # 🎯 PRIORITY 1: Try OpenAI first if available and within rate limits
         if openai_api_key and len(request.jobs) > 0:
-            logger.info("🤖 Using enhanced OpenAI batch analysis with context extraction")
+            logger.info(f"🔍 BATCH DEBUG: Checking OpenAI rate limits...")
             
-            # Check if Llama/free LLM is available for context extraction
-            use_llama = (
-                os.getenv('GROQ_API_KEY') or 
-                os.getenv('OLLAMA_AVAILABLE', '').lower() == 'true' or 
-                os.getenv('HUGGINGFACE_API_KEY')
-            )
+            # Check OpenAI rate limit before proceeding
+            rate_limit_result = rate_limiter.is_openai_allowed(user_identifier, max_openai_calls=10, window_hours=24)
+            logger.info(f"🔍 BATCH DEBUG: Rate limit check result: {rate_limit_result}")
             
-            if use_llama:
-                logger.info("🧠 Llama available for context-aware extraction")
-                matched_jobs = await batch_analyze_jobs_with_openai_enhanced(request.jobs, request.resume_data, openai_api_key, use_llama_extraction=True)
-                processing_method = "llama_openai_enhanced"
+            if rate_limit_result:
+                logger.info(f"🔒 OpenAI rate limit check passed for {user_identifier}")
+                logger.info("🤖 Using OpenAI for realistic, accurate batch analysis")
+                
+                # 🚀 IMPORTANT: Record the OpenAI call BEFORE making the request
+                rate_limiter.record_openai_call(user_identifier)
+                
+                try:
+                    # 🎯 PRIMARY PATH: Use OpenAI for accurate scoring
+                    matched_jobs = await batch_analyze_jobs_with_openai_enhanced(request.jobs, request.resume_data, openai_api_key, use_llama_extraction=True)
+                    processing_method = "openai_realistic_primary"
+                    
+                    logger.info(f"✅ OpenAI analysis completed successfully with realistic scores")
+                    
+                except Exception as e:
+                    logger.error(f"❌ OpenAI analysis failed: {str(e)}")
+                    logger.info("📊 Falling back to conservative similarity matching")
+                    matched_jobs = await batch_analyze_jobs_similarity(request.jobs, request.resume_data)
+                    processing_method = "similarity_fallback_openai_error"
             else:
-                logger.info("📝 Using smart extraction with OpenAI matching")
-                matched_jobs = await batch_analyze_jobs_with_openai(request.jobs, request.resume_data, openai_api_key)
-                processing_method = "smart_openai_optimized"
+                # Rate limit exceeded, use similarity fallback
+                usage_stats = rate_limiter.get_usage_stats(user_identifier)
+                logger.warning(f"🚫 OpenAI rate limit exceeded for user {user_identifier}: {usage_stats}")
+                logger.info("📊 Using conservative similarity matching due to rate limit")
+                matched_jobs = await batch_analyze_jobs_similarity(request.jobs, request.resume_data)
+                processing_method = "similarity_fallback_rate_limited"
+                
+                # Add rate limit info to response
+                logger.info(f"⚠️ OpenAI calls exhausted ({usage_stats['openai_calls_last_24h']}/10 daily limit)")
         else:
-            logger.info("📊 Using fallback similarity matching")
+            # No OpenAI API key or no jobs
+            logger.info(f"🔍 BATCH DEBUG: Using similarity fallback - API key: {bool(openai_api_key)}, Jobs: {len(request.jobs)}")
+            logger.info("📊 Using conservative similarity matching (no OpenAI key)")
             matched_jobs = await batch_analyze_jobs_similarity(request.jobs, request.resume_data)
-            processing_method = "similarity_batch"
+            processing_method = "similarity_conservative_no_openai"
         
         # Filter by threshold and limit results
         threshold_score = request.match_threshold * 100
@@ -1359,9 +2375,32 @@ async def batch_job_matching(request: BatchJobMatchRequest):
         
         logger.info(f"✅ Batch analysis complete: {len(top_jobs)}/{len(request.jobs)} jobs passed threshold")
         
-        return ScanPageResponse(
+        # 🚀 DEBUG: Log the exact response being sent to frontend
+        logger.info("=" * 80)
+        logger.info("🔍 FRONTEND RESPONSE DEBUG")
+        logger.info("=" * 80)
+        logger.info(f"📊 Response Summary:")
+        logger.info(f"   • Success: True")
+        logger.info(f"   • Jobs found: {len(request.jobs)}")
+        logger.info(f"   • Matches returned: {len(top_jobs)}")
+        logger.info(f"   • Processing method: {processing_method}")
+        logger.info(f"   • Processing time: {processing_time}ms")
+        
+        logger.info(f"\n📋 Individual Job Results:")
+        for i, job in enumerate(top_jobs, 1):
+            score_source = job.get('score_source', 'unknown')
+            logger.info(f"   Job {i}:")
+            logger.info(f"     • Title: {job.get('title', 'Unknown')}")
+            logger.info(f"     • Company: {job.get('company', 'Unknown')}")
+            logger.info(f"     • Match Score: {job.get('match_score', 0)}% ({score_source})")
+            logger.info(f"     • Matching Skills: {job.get('matching_skills', [])}")
+            logger.info(f"     • Summary: {job.get('summary', 'No summary')[:100]}...")
+            logger.info(f"     • Confidence: {job.get('confidence', 'unknown')}")
+        
+        # Create the response object
+        response_data = ScanPageResponse(
             success=True,
-            message=f"Batch analyzed {len(request.jobs)} jobs, found {len(top_jobs)} matches",
+            message=f"Batch analyzed {len(request.jobs)} jobs, found {len(top_jobs)} matches using {processing_method}",
             jobs_found=len(request.jobs),
             matches=[
                 JobMatch(
@@ -1383,6 +2422,18 @@ async def batch_job_matching(request: BatchJobMatchRequest):
             processing_time_ms=processing_time,
             processing_method=processing_method
         )
+        
+        # 🚀 DEBUG: Log the exact JSON being sent
+        logger.info(f"\n📤 FINAL SCORES SUMMARY:")
+        logger.info("=" * 80)
+        for i, job in enumerate(top_jobs, 1):
+            logger.info(f"Job {i}: {job.get('title', 'Unknown')} = {job.get('match_score')}% via {job.get('score_source', 'unknown')}")
+        
+        logger.info("=" * 80)
+        logger.info("🔍 END FRONTEND RESPONSE DEBUG")
+        logger.info("=" * 80)
+        
+        return response_data
         
     except Exception as e:
         logger.error(f"Batch job matching failed: {str(e)}")
@@ -1477,8 +2528,8 @@ def create_concise_job_summary(job: Dict[str, Any]) -> Dict[str, Any]:
 
 async def batch_analyze_jobs_with_openai(jobs: List[Dict], resume_data: Dict, api_key: str) -> List[Dict]:
     """
-    Analyze all jobs in a single OpenAI API call for cost efficiency
-    Now uses concise job summaries to reduce token usage
+    🎯 FIXED: Analyze all jobs in a single OpenAI API call for consistent, accurate scoring
+    Now prioritizes OpenAI's match scores over inflated similarity matching
     """
     try:
         import openai
@@ -1486,12 +2537,12 @@ async def batch_analyze_jobs_with_openai(jobs: List[Dict], resume_data: Dict, ap
         
         client = OpenAI(api_key=api_key)
         
-        # 🚀 NEW: Create concise summaries for OpenAI processing
+        # 🚀 Create concise summaries for OpenAI processing (to reduce token costs)
         logger.info("📝 Creating concise job summaries for OpenAI analysis...")
         job_summaries = []
         
         for i, job in enumerate(jobs):
-            # Create concise summary
+            # Create concise summary to save tokens
             job_summary = create_concise_job_summary(job)
             
             summary = {
@@ -1527,48 +2578,59 @@ async def batch_analyze_jobs_with_openai(jobs: List[Dict], resume_data: Dict, ap
             "summary": resume_data.get('summary', '')[:300] if resume_data.get('summary') else ''  # Limit summary
         }
         
-        # Create focused prompt for batch analysis
+        # 🎯 ENHANCED: Create focused prompt that asks OpenAI to be realistic about scoring
         prompt = f"""
-Analyze {len(job_summaries)} software engineering jobs against this candidate's profile. Focus on technical skill alignment and experience relevance.
+Analyze {len(job_summaries)} software engineering jobs against this candidate's profile. 
+
+⚠️ IMPORTANT: Be REALISTIC with match scores. A 100% match should be extremely rare - only for perfect fits where the candidate has ALL required skills and experience. Most good matches should be 60-85%.
 
 CANDIDATE PROFILE:
 Skills: {', '.join(resume_summary.get('skills', []))}
-Experience: {len(resume_summary.get('experience', []))} positions
+Experience: {len(resume_summary.get('experience', []))} positions in software engineering
 Education: {', '.join(resume_summary.get('education', []))}
+Background: {resume_summary.get('summary', 'Not provided')}
 
 JOBS TO ANALYZE:
-{chr(10).join([f"{i+1}. {job['title']} at {job['company']} - {job['description'][:200]}..." for i, job in enumerate(job_summaries)])}
+{chr(10).join([f"{i+1}. {job['title']} at {job['company']}{chr(10)}{str(job['description'])[:300]}..." for i, job in enumerate(job_summaries)])}
+
+🎯 SCORING GUIDELINES:
+- 90-100%: Perfect match (has ALL required skills + experience level)
+- 75-89%: Excellent match (has most required skills + right experience)
+- 60-74%: Good match (has core skills, some gaps in experience/tools)
+- 45-59%: Fair match (has some relevant skills, significant gaps)
+- 30-44%: Poor match (few relevant skills, wrong experience level)
+- Below 30%: Not suitable
 
 For each job, provide:
-1. Match score (0-100) based on skills and experience alignment
-2. Top 3 matching skills from candidate profile
-3. Top 2 missing skills that would strengthen candidacy
-4. Brief match reasoning (1 sentence)
+1. Realistic match score (30-100) based on actual fit
+2. Top 3 matching skills from candidate's profile
+3. Top 2 missing/weak skills that would strengthen candidacy
+4. Brief reasoning for the score (1 sentence)
 5. Confidence level (high/medium/low)
 
 Format as JSON array:
 [
   {{
     "id": 1,
-    "match_score": 85,
+    "match_score": 68,
     "matching_skills": ["Python", "AWS", "React"],
     "missing_skills": ["Kubernetes", "GraphQL"],
-    "analysis": "Strong technical match with required Python and cloud experience.",
-    "confidence": "high"
+    "analysis": "Good Python/AWS fit but lacks senior experience and specific tools mentioned",
+    "confidence": "medium"
   }}
 ]
 
-Focus on technical requirements and career progression fit. Be concise and accurate.
+Focus on realistic assessment. Don't inflate scores - be honest about gaps.
 """
 
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",  # Using 3.5-turbo for cost efficiency
             messages=[
-                {"role": "system", "content": "You are an expert technical recruiter. Provide accurate, concise job-candidate matching analysis."},
+                {"role": "system", "content": "You are a brutally honest technical recruiter. Give realistic match scores - most jobs should score 60-80% for good candidates. Only perfect fits get 90%+."},
                 {"role": "user", "content": prompt}
             ],
             max_tokens=1500,  # Reduced tokens since we need less output
-            temperature=0.3
+            temperature=0.2  # Lower temperature for more consistent realistic scoring
         )
         
         # Parse OpenAI response
@@ -1579,174 +2641,146 @@ Focus on technical requirements and career progression fit. Be concise and accur
         import json
         try:
             ai_analysis = json.loads(ai_response)
+            logger.info(f"✅ Successfully parsed OpenAI analysis for {len(ai_analysis)} jobs")
         except json.JSONDecodeError:
-            logger.warning("OpenAI response not valid JSON, using fallback")
+            logger.warning("❌ OpenAI response not valid JSON, using fallback similarity matching")
             return await batch_analyze_jobs_similarity(jobs, resume_data)
         
-        # Merge AI analysis with original job data
+        # 🎯 PRIORITY FIX: Use OpenAI scores directly, not similarity scores
         analyzed_jobs = []
         for i, job in enumerate(jobs):
             ai_result = ai_analysis[i] if i < len(ai_analysis) else {}
             
+            # 🚀 KEY FIX: Use OpenAI's realistic score as the PRIMARY score
+            openai_score = ai_result.get('match_score', 50)
+            
             analyzed_job = {
                 **job,  # Keep original full job data
-                "match_score": ai_result.get('match_score', 50),
+                "match_score": openai_score,  # 🎯 Use OpenAI score directly
                 "matching_skills": ai_result.get('matching_skills', []),
                 "missing_skills": ai_result.get('missing_skills', []),
                 "summary": ai_result.get('analysis', 'AI analysis not available'),
                 "confidence": ai_result.get('confidence', 'medium'),
                 "ai_analysis": ai_result.get('analysis', ''),
-                "processing_method": "openai_batch_optimized"
+                "processing_method": "openai_realistic_scoring",
+                "score_source": "openai_primary"  # Track that this came from OpenAI
             }
             analyzed_jobs.append(analyzed_job)
+            
+            # 🔍 Log the realistic scoring
+            logger.info(f"🎯 Job {i+1}: {job.get('title', 'Unknown')} - OpenAI Score: {openai_score}%")
         
-        logger.info(f"✅ Optimized OpenAI batch analysis complete for {len(analyzed_jobs)} jobs")
+        logger.info(f"✅ OpenAI realistic batch analysis complete for {len(analyzed_jobs)} jobs")
         return analyzed_jobs
         
     except Exception as e:
-        logger.error(f"OpenAI batch analysis failed: {str(e)}")
+        logger.error(f"❌ OpenAI batch analysis failed: {str(e)}")
         # Fallback to similarity matching
         return await batch_analyze_jobs_similarity(jobs, resume_data)
 
 async def batch_analyze_jobs_similarity(jobs: List[Dict], resume_data: Dict) -> List[Dict]:
     """
-    Fallback similarity-based matching when OpenAI is not available
+    🎯 FIXED: More realistic similarity-based matching when OpenAI is not available
+    Reduced inflated scoring and made it more honest about limitations
     """
     try:
-        # 🔍 PRINT JOB DESCRIPTIONS BEING ANALYZED IN BATCH MODE
-        print("\n" + "="*80)
-        print(f"🔄 BATCH ANALYZING {len(jobs)} JOBS WITH SIMILARITY MATCHING")
-        print("="*80)
-        
-        # 🚀 DEMO: Test Groq extraction on first 3 jobs to show quality
-        if os.getenv('GROQ_API_KEY') and len(jobs) >= 3:
-            print("\n🧪 GROQ EXTRACTION DEMO (First 3 Jobs)")
-            print("="*80)
-            
-            for i in range(min(3, len(jobs))):
-                job = jobs[i]
-                print(f"\n📋 DEMO JOB #{i+1}")
-                print(f"Title: {job.get('title', 'No Title')}")
-                print(f"Company: {job.get('company', 'No Company')}")
-                print(f"Original Length: {len(str(job.get('description', '')))} characters")
-                
-                # Test Groq extraction
-                if len(str(job.get('description', ''))) > 2000:
-                    enhanced_job = await create_llama_context_extraction(job)
-                    
-                    # Show comparison
-                    if enhanced_job.get('extraction_method') == 'groq_llama_extraction':
-                        original_len = enhanced_job.get('original_description_length', 0)
-                        summary_len = enhanced_job.get('summary_description_length', 0)
-                        print(f"🎯 GROQ SUCCESS: {original_len} → {summary_len} chars ({enhanced_job.get('compression_ratio', 'N/A')})")
-                    else:
-                        print("🔄 Groq extraction not used (description too short or API issue)")
-                else:
-                    print("⏭️  Job description too short for Groq extraction demo")
-                
-                # 🕐 SMART: Add delay between requests to avoid rate limits
-                if i < 2:  # Don't delay after last job
-                    print("⏳ Pausing 3 seconds to respect rate limits...")
-                    await asyncio.sleep(3)
-            
-            print("\n" + "="*80)
-            print("📊 GROQ DEMO COMPLETE - Now proceeding with similarity matching...")
-            print("="*80)
-        
-        for i, job in enumerate(jobs, 1):
-            print(f"\n📋 ANALYZING JOB #{i}")
-            print(f"Title: {job.get('title', 'No Title')}")
-            print(f"Company: {job.get('company', 'No Company')}")
-            print(f"Location: {job.get('location', 'No Location')}")
-            description = job.get('description', 'No description available')
-            print(f"Description Length: {len(str(description))}")
-            print("Description Preview:")
-            print("-" * 40)
-            # 🚀 SHOW MORE CONTENT - Print first 1500 characters instead of 300
-            if len(description) > 1500:
-                print(description[:1500])
-                print("\n[Description continues... showing first 1500 characters]")
-                print(f"[Total length: {len(description)} characters]")
-            else:
-                print(description)
-            print("-" * 40)
-        
-        print("="*80 + "\n")
+        logger.info(f"📊 Using similarity matching as fallback for {len(jobs)} jobs")
         
         # Common words to exclude from matching
         common_words = {'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'a', 'an', 'as', 'are', 'was', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'must', 'can', 'is', 'am', 'we', 'you', 'they', 'them', 'their', 'this', 'that', 'these', 'those', 'if', 'when', 'where', 'how', 'why', 'what', 'who', 'which'}
         
         # Prepare resume text
         resume_skills = resume_data.get('skills', [])
-        resume_text = ' '.join(resume_skills) + ' ' + resume_data.get('summary', '')
+        resume_text = ' '.join(str(skill) for skill in resume_skills) + ' ' + str(resume_data.get('summary', ''))
         
-        # Analyze each job
+        # Analyze each job with REALISTIC scoring
         analyzed_jobs = []
         for i, job in enumerate(jobs):
-            job_text_lower = job.get('description', '').lower()
-            
-            # Debug logging for first few jobs
-            if i < 3:
-                logger.info(f"DEBUG Job {i+1}: Title='{job.get('title', 'None')}', Description preview='{job.get('description', 'None')[:100]}...'")
-                logger.info(f"DEBUG Job {i+1}: Job words sample: {list(job_text_lower.split())[:10]}")
-            
-            # Calculate match score based on keyword overlap
-            matching_keywords = set(job_text_lower.split()) - common_words
-            
-            # Calculate match percentage
-            match_percentage = min(int((len(matching_keywords) / len(job_text_lower.split())) * 100), 100)
-            
-            # Start with base score
-            match_score = 30  # Base score
-            
-            # Boost score if key skills are found
-            skill_matches = []
-            for skill in resume_skills:
-                if skill.lower() in job_text_lower:
-                    skill_matches.append(skill)
-                    match_score += 10  # Bonus for each skill match
-            
-            # Special handling for Amazon jobs - boost common tech terms
-            amazon_tech_terms = ['aws', 'cloud', 'java', 'python', 'javascript', 'react', 'node', 'docker', 'kubernetes', 'sql']
-            amazon_matches = [term for term in amazon_tech_terms if term in job_text_lower]
-            if amazon_matches:
-                match_score += len(amazon_matches) * 5  # Bonus for Amazon tech terms
-                skill_matches.extend(amazon_matches)
-            
-            # Cap the score at 100
-            match_score = min(match_score, 100)
-            
-            # Ensure minimum score for real jobs
-            match_score = max(match_score, 25)  # Minimum score
-            
-            analyzed_job = {
-                **job,
-                "match_score": match_score,
-                "matching_skills": skill_matches[:5],
-                "missing_skills": [],
-                "summary": f"Similarity-based match: {match_percentage}% alignment with your profile",
-                "confidence": "medium" if match_score > 60 else "low",
-                "processing_method": "similarity_batch"
-            }
-            analyzed_jobs.append(analyzed_job)
-            
-            # Print analysis result
-            print(f"✅ Job #{i+1} Analysis: Score={match_score}%, Skills matched: {skill_matches}")
+            try:
+                job_text_lower = str(job.get('description', '')).lower()
+                
+                # 🎯 MORE REALISTIC: Start with lower base scores
+                skill_matches = []
+                skill_match_count = 0
+                
+                # Count actual skill matches (be strict)
+                for skill in resume_skills:
+                    if str(skill).lower() in job_text_lower:
+                        skill_matches.append(skill)
+                        skill_match_count += 1
+                
+                # 🎯 REALISTIC SCORING: Much more conservative
+                if skill_match_count >= 6:  # Has most skills
+                    base_score = 75  # Reduced from inflated scores
+                elif skill_match_count >= 4:  # Has good skills
+                    base_score = 65
+                elif skill_match_count >= 2:  # Has some skills
+                    base_score = 55
+                elif skill_match_count >= 1:  # Has few skills
+                    base_score = 45
+                else:  # No clear skill matches
+                    base_score = 35
+                
+                # 🎯 CONSERVATIVE BONUSES: Much smaller bonuses
+                tech_bonus = 0
+                tech_terms = ['api', 'database', 'cloud', 'agile']  # Reduced list
+                tech_matches = [term for term in tech_terms if term in job_text_lower]
+                if tech_matches:
+                    tech_bonus = min(len(tech_matches) * 2, 8)  # Max 8 points from tech terms
+                
+                # 🎯 REALISTIC FINAL SCORE: Cap at reasonable level for similarity matching
+                final_score = min(base_score + tech_bonus, 78)  # Cap at 78% for similarity matching
+                final_score = max(final_score, 30)  # Minimum 30%
+                
+                # 🎯 HONEST SUMMARY: Acknowledge limitations of similarity matching
+                summary = f"Similarity match: {final_score}% (found {skill_match_count} matching skills). Note: This is basic keyword matching - OpenAI analysis would be more accurate."
+                
+                analyzed_job = {
+                    **job,
+                    "match_score": final_score,
+                    "matching_skills": skill_matches[:5],  # Show top 5 matches
+                    "missing_skills": [],  # Can't reliably determine missing skills with similarity
+                    "summary": summary,
+                    "confidence": "medium" if final_score > 60 else "low",  # Lower confidence for similarity
+                    "processing_method": "similarity_conservative",
+                    "score_source": "similarity_fallback",  # Track that this is fallback
+                    "skill_match_count": skill_match_count,
+                    "base_score": base_score,
+                    "tech_bonus": tech_bonus
+                }
+                analyzed_jobs.append(analyzed_job)
+                
+                logger.info(f"📊 Job {i+1}: {job.get('title', 'Unknown')} - Similarity Score: {final_score}% ({skill_match_count} skills)")
+                
+            except Exception as e:
+                logger.error(f"Error processing job {i+1}: {str(e)}")
+                # Ultra-basic fallback
+                analyzed_job = {
+                    **job,
+                    "match_score": 40,  # Conservative default
+                    "matching_skills": [],
+                    "missing_skills": [],
+                    "summary": "Basic similarity matching failed - limited analysis available",
+                    "confidence": "low",
+                    "processing_method": "similarity_error_fallback"
+                }
+                analyzed_jobs.append(analyzed_job)
         
-        logger.info(f"✅ Similarity batch analysis complete for {len(analyzed_jobs)} jobs")
+        logger.info(f"✅ Conservative similarity analysis complete for {len(analyzed_jobs)} jobs")
         return analyzed_jobs
         
     except Exception as e:
         logger.error(f"Similarity analysis failed: {str(e)}")
-        # Return basic job data with minimal scoring
+        # Return minimal scoring if everything fails
         return [
             {
                 **job,
-                "match_score": 50,
+                "match_score": 40,  # Conservative default
                 "matching_skills": [],
                 "missing_skills": [],
-                "summary": "Basic job information available",
-                "confidence": "low"
+                "summary": "Limited analysis available - recommend using OpenAI for accurate scoring",
+                "confidence": "low",
+                "processing_method": "minimal_fallback"
             }
             for job in jobs
         ]
@@ -1920,13 +2954,26 @@ Extracted Summary:"""
                 import requests
                 import time
                 
-                print("🔄 Calling Groq API for intelligent extraction...")
+                groq_api_key = os.getenv('GROQ_API_KEY')
+                logger.info(f"🔑 Groq API key found: {groq_api_key[:8]}...{groq_api_key[-4:] if len(groq_api_key) > 12 else ''}")
+                
+                logger.info("🔄 Calling Groq API for intelligent extraction...")
                 
                 groq_url = "https://api.groq.com/openai/v1/chat/completions"
                 headers = {
-                    "Authorization": f"Bearer {os.getenv('GROQ_API_KEY')}",
+                    "Authorization": f"Bearer {groq_api_key}",
                     "Content-Type": "application/json"
                 }
+                
+                # Calculate safe batch size based on job description length
+                safe_batch_size = 5  # Default safe size
+                if len(full_description) > 5000:  # Very long descriptions
+                    safe_batch_size = 3
+                elif len(full_description) > 2000:  # Long descriptions
+                    safe_batch_size = 4
+                
+                logger.info(f"📊 Job description length: {len(full_description)} chars")
+                logger.info(f"🎯 Safe batch size for this job: {safe_batch_size}")
                 
                 payload = {
                     "model": "llama3-70b-8192",  # Fast and very capable model
@@ -1939,11 +2986,23 @@ Extracted Summary:"""
                     "top_p": 0.9
                 }
                 
+                # Add delay between jobs to avoid rate limits
+                if hasattr(create_llama_context_extraction, '_last_groq_call'):
+                    time_since_last = time.time() - create_llama_context_extraction._last_groq_call
+                    if time_since_last < 2.5:  # Minimum 2.5 seconds between calls
+                        wait_time = 2.5 - time_since_last
+                        logger.info(f"⏳ Waiting {wait_time:.1f}s between Groq calls to avoid rate limits...")
+                        time.sleep(wait_time)
+                
                 # 🔄 SMART RATE LIMITING: Retry with exponential backoff
                 max_retries = 3
                 for attempt in range(max_retries):
                     try:
+                        logger.info(f"🔄 Groq API attempt {attempt + 1}/{max_retries} for job: {title}")
                         response = requests.post(groq_url, headers=headers, json=payload, timeout=15)
+                        
+                        # Record successful API call time
+                        create_llama_context_extraction._last_groq_call = time.time()
                         
                         if response.status_code == 200:
                             result = response.json()
@@ -1957,14 +3016,18 @@ Extracted Summary:"""
                                 # Create final description with structure
                                 final_description = f"Position: {title} at {company}\n\n{llama_summary}"
                                 
-                                # 🔍 DEBUG: Print extraction results
-                                print("✅ Groq extraction successful!")
-                                print(f"📊 Compression: {len(full_description)} → {len(final_description)} chars ({len(final_description)/len(full_description)*100:.1f}%)")
-                                print("🧠 Groq Extracted Summary:")
-                                print("-" * 40)
-                                print(llama_summary)
-                                print("-" * 40)
-                                print("=" * 60 + "\n")
+                                # 🔍 ENHANCED LOGGING: Show actual Groq content for debugging
+                                logger.info("✅ Groq extraction successful!")
+                                logger.info(f"📊 Compression: {len(full_description)} → {len(final_description)} chars ({len(final_description)/len(full_description)*100:.1f}%)")
+                                logger.info("🧠 GROQ EXTRACTED SUMMARY:")
+                                logger.info("-" * 60)
+                                logger.info(f"Job: {title} at {company}")
+                                logger.info("-" * 60)
+                                logger.info(llama_summary)
+                                logger.info("-" * 60)
+                                logger.info(f"📝 Summary length: {len(llama_summary)} chars")
+                                logger.info(f"🎯 Final description length: {len(final_description)} chars")
+                                logger.info("=" * 80)
                                 
                                 job_summary = job.copy()
                                 job_summary['description'] = final_description
@@ -1975,6 +3038,8 @@ Extracted Summary:"""
                                 
                                 logger.info(f"🚀 Groq extracted '{title}': {len(full_description)} → {len(final_description)} chars ({job_summary['compression_ratio']})")
                                 return job_summary
+                            else:
+                                logger.error(f"❌ Groq returned empty or too short summary: {len(llama_summary) if llama_summary else 0} chars")
                         
                         elif response.status_code == 429:  # Rate limit
                             error_data = response.json()
@@ -1992,24 +3057,31 @@ Extracted Summary:"""
                                 except:
                                     pass
                             
-                            print(f"⚠️  Rate limit hit (attempt {attempt + 1}/{max_retries})")
-                            print(f"⏳ Waiting {wait_time:.1f} seconds before retry...")
+                            logger.warning(f"⚠️  Rate limit hit (attempt {attempt + 1}/{max_retries})")
+                            logger.warning(f"⏳ Waiting {wait_time:.1f} seconds before retry...")
+                            logger.warning(f"🚨 GROQ RATE LIMIT: {response.status_code} - {error_message}")
                             
                             if attempt < max_retries - 1:  # Don't wait on last attempt
                                 time.sleep(wait_time)
                                 continue
                             else:
-                                print(f"❌ Max retries reached. Using fallback extraction.")
-                                print("💡 Tip: Process fewer jobs at once or upgrade Groq tier")
-                                print("=" * 60 + "\n")
+                                logger.error(f"❌ Max Groq retries reached. Using fallback extraction.")
+                                logger.error("💡 Tip: Process fewer jobs at once or upgrade Groq tier")
+                                logger.error(f"🔢 Current batch size: {safe_batch_size} jobs")
                                 break
                         else:
-                            print(f"❌ Groq API error: {response.status_code} - {response.text}")
-                            print("=" * 60 + "\n")
+                            error_message = response.text
+                            try:
+                                error_json = response.json()
+                                error_message = error_json.get('error', {}).get('message', error_message)
+                            except:
+                                pass
+                            logger.error(f"❌ Groq API error: {response.status_code} - {error_message}")
+                            logger.error(f"🔍 Request details: URL={groq_url}, Headers={headers.keys()}, Payload size={len(str(payload))} chars")
                             break
                     
                     except requests.exceptions.Timeout:
-                        print(f"⏰ Groq API timeout (attempt {attempt + 1}/{max_retries})")
+                        logger.warning(f"⏰ Groq API timeout (attempt {attempt + 1}/{max_retries})")
                         if attempt < max_retries - 1:
                             time.sleep(2 ** attempt)  # Exponential backoff
                             continue
@@ -2017,16 +3089,20 @@ Extracted Summary:"""
                             break
                     
                     except Exception as e:
-                        print(f"❌ Groq request failed: {str(e)}")
+                        logger.error(f"❌ Groq request failed: {str(e)}")
+                        logger.error(f"🔍 Error type: {type(e).__name__}")
+                        import traceback
+                        logger.error(f"📚 Stack trace:\n{traceback.format_exc()}")
                         break
+                
+                # If we get here, Groq failed - mark it as failed and continue to fallbacks
+                logger.error("❌ Groq extraction completely failed - trying fallback methods")
             
             except Exception as e:
-                print(f"❌ Groq extraction failed: {str(e)}")
-                print("=" * 60 + "\n")
+                logger.error(f"❌ Groq extraction failed: {str(e)}")
                 logger.warning(f"Groq extraction failed: {str(e)}")
         else:
-            print("❌ GROQ_API_KEY not found - skipping Groq extraction")
-            print("=" * 60 + "\n")
+            logger.warning("❌ GROQ_API_KEY not found - skipping Groq extraction")
         
         # 🏠 Priority 2: Ollama Local (Free, requires local setup)
         if os.getenv('OLLAMA_AVAILABLE', '').lower() == 'true':
@@ -2113,15 +3189,11 @@ Extracted Summary:"""
                 logger.warning(f"HuggingFace extraction failed: {str(e)}")
         
         # Fallback to smart extraction if all LLM options unavailable
-        print(f"🔄 All LLM options unavailable, using smart keyword extraction for '{title}'")
-        print("=" * 60 + "\n")
         logger.info(f"🔄 All LLM options unavailable, using smart keyword extraction for '{title}'")
         return create_concise_job_summary(job)
         
     except Exception as e:
-        print(f"❌ Error in LLM context extraction: {str(e)}")
-        print("=" * 60 + "\n")
-        logger.error(f"Error in LLM context extraction: {str(e)}")
+        logger.error(f"❌ Error in LLM context extraction: {str(e)}")
         return create_concise_job_summary(job)
 
 # Update the batch analysis to use Llama extraction
@@ -2133,45 +3205,152 @@ async def batch_analyze_jobs_with_openai_enhanced(jobs: List[Dict], resume_data:
     try:
         import openai
         from openai import OpenAI
+        import time
+        
+        # 🚀 Add start_time for logging
+        start_time = time.time()
+        
+        # 🔍 DEBUG: Add extensive logging
+        logger.info(f"🔍 OPENAI ENHANCED DEBUG: FUNCTION ENTRY")
+        logger.info(f"🔍 OPENAI ENHANCED DEBUG: Starting with {len(jobs)} jobs")
+        logger.info(f"🔍 OPENAI ENHANCED DEBUG: API key length: {len(api_key) if api_key else 0}")
+        logger.info(f"🔍 OPENAI ENHANCED DEBUG: use_llama_extraction: {use_llama_extraction}")
+        logger.info(f"🔍 OPENAI ENHANCED DEBUG: Resume data available: {bool(resume_data)}")
+        
+        # 🚀 NEW DEBUG: Log actual resume_data structure
+        logger.info(f"🔍 RESUME DEBUG: Resume data type: {type(resume_data)}")
+        logger.info(f"🔍 RESUME DEBUG: Resume data keys: {list(resume_data.keys()) if isinstance(resume_data, dict) else 'Not a dict'}")
+        if isinstance(resume_data, dict):
+            logger.info(f"🔍 RESUME DEBUG: Skills count: {len(resume_data.get('skills', []))}")
+            logger.info(f"🔍 RESUME DEBUG: Experience count: {len(resume_data.get('experience', []))}")
+            logger.info(f"🔍 RESUME DEBUG: Education count: {len(resume_data.get('education', []))}")
+            logger.info(f"🔍 RESUME DEBUG: Summary length: {len(str(resume_data.get('summary', '')))}")
+            
+            # Log first experience item structure if available
+            experience_list = resume_data.get('experience', [])
+            if experience_list and len(experience_list) > 0:
+                first_exp = experience_list[0]
+                logger.info(f"🔍 RESUME DEBUG: First experience type: {type(first_exp)}")
+                if isinstance(first_exp, dict):
+                    logger.info(f"🔍 RESUME DEBUG: First experience keys: {list(first_exp.keys())}")
+                    logger.info(f"🔍 RESUME DEBUG: Has technologies field: {'technologies' in first_exp}")
         
         client = OpenAI(api_key=api_key)
         
-        # 🚀 Stage 1: Use Llama for intelligent context extraction
+        logger.info(f"🔍 OPENAI ENHANCED DEBUG: OpenAI client created successfully")
+        
+        # 🚀 Validate input data
+        if not isinstance(jobs, list):
+            logger.error(f"Jobs parameter must be a list, got {type(jobs)}")
+            return await batch_analyze_jobs_similarity(jobs, resume_data)
+        
+        # Filter and validate job objects
+        valid_jobs = []
+        for i, job in enumerate(jobs):
+            if isinstance(job, dict):
+                # Ensure job has all required fields with defaults
+                processed_job = {
+                    'title': job.get('title', 'Unknown Position'),
+                    'company': job.get('company', 'Unknown Company'),
+                    'description': job.get('description', ''),
+                    'extraction_method': job.get('extraction_method', 'original'),
+                    'url': job.get('url', ''),
+                    'location': job.get('location', ''),
+                    **job  # Keep all other fields
+                }
+                valid_jobs.append(processed_job)
+            else:
+                logger.warning(f"Job {i} is not a dict: {type(job)}, skipping")
+        
+        if not valid_jobs:
+            logger.error("No valid job dictionaries found")
+            return await batch_analyze_jobs_similarity(jobs, resume_data)
+        
+        # 🚀 GROQ RATE LIMIT PROTECTION: Limit batch size to prevent 429 errors
+        if use_llama_extraction and os.getenv('GROQ_API_KEY'):
+            # Groq free tier: 6k tokens/minute limit
+            # With ~600 tokens per job, max 5-6 jobs per minute
+            max_groq_batch_size = 5
+            if len(valid_jobs) > max_groq_batch_size:
+                logger.warning(f"🚨 GROQ PROTECTION: Batch size {len(valid_jobs)} exceeds safe limit of {max_groq_batch_size}")
+                logger.warning(f"💡 Processing first {max_groq_batch_size} jobs to avoid rate limits")
+                logger.warning(f"🔧 Consider splitting large batches or upgrading Groq tier")
+                valid_jobs = valid_jobs[:max_groq_batch_size]
+        
+        logger.info(f"🔍 Processing {len(valid_jobs)} valid jobs out of {len(jobs)} total")
+        
+        # 🚀 Stage 1: Use smart extraction for job summaries
         if use_llama_extraction:
-            logger.info("🧠 Using Llama for context-aware job extraction...")
+            logger.info("🧠 Using Groq + smart extraction for enhanced job summaries...")
             job_summaries = []
             
-            for i, job in enumerate(jobs):
-                # Use Llama for intelligent extraction
-                job_summary = await create_llama_context_extraction(job)
-                
-                summary = {
-                    "id": i + 1,
-                    "title": job_summary.get('title', 'Unknown'),
-                    "company": job_summary.get('company', 'Unknown'),
-                    "location": job_summary.get('location', 'Unknown'),
-                    "description": job_summary.get('description', ''),
-                    "extraction_method": job_summary.get('extraction_method', 'smart'),
-                    "original_length": job_summary.get('original_description_length', 0),
-                    "summary_length": job_summary.get('summary_description_length', 0)
-                }
-                job_summaries.append(summary)
-        else:
-            # Fallback to smart extraction
-            logger.info("📝 Using smart keyword extraction...")
-            job_summaries = []
-            for i, job in enumerate(jobs):
-                job_summary = create_concise_job_summary(job)
-                summary = {
-                    "id": i + 1,
-                    "title": job_summary.get('title', 'Unknown'),
-                    "company": job_summary.get('company', 'Unknown'),
-                    "location": job_summary.get('location', 'Unknown'),
-                    "description": job_summary.get('description', ''),
-                    "original_length": job_summary.get('original_description_length', 0),
-                    "summary_length": job_summary.get('summary_description_length', 0)
-                }
-                job_summaries.append(summary)
+            for i, job in enumerate(valid_jobs):
+                try:
+                    # 🎯 PRIORITY 1: Try Groq extraction for intelligent summarization
+                    if os.getenv('GROQ_API_KEY'):
+                        logger.info(f"🔄 Job {i+1}/{len(jobs)}: Trying Groq extraction for '{job.get('title', 'Unknown')}'")
+                        groq_enhanced_job = await create_llama_context_extraction(job)
+                        # logger.info("groq_enhanced_job",groq_enhanced_job)
+                        
+                        # Check if Groq extraction was successful by looking for Groq-specific formatting
+                        if (groq_enhanced_job and 
+                            groq_enhanced_job.get('description') and 
+                            len(groq_enhanced_job.get('description', '')) > 200 and
+                            ('Position:' in groq_enhanced_job.get('description', '') or 
+                             groq_enhanced_job.get('extraction_method') == 'groq_llama_extraction')):
+                            
+                            # Use Groq-enhanced summary
+                            job_summary = groq_enhanced_job
+                            logger.info(f"✅ Job {i+1}: Groq success - {groq_enhanced_job.get('compression_ratio', 'N/A')} compression")
+                        else:
+                            # Groq failed, use smart extraction fallback
+                            logger.info(f"⚠️ Job {i+1}: Groq failed, using smart extraction fallback")
+                            job_summary = create_concise_job_summary(job)
+                    else:
+                        # No Groq API key, use smart extraction
+                        logger.info(f"📝 Job {i+1}/{len(jobs)}: Using smart extraction (no Groq key)")
+                        job_summary = create_concise_job_summary(job)
+                    
+                    # Create summary object for OpenAI
+                    summary = {
+                        "id": i + 1,
+                        "title": job_summary.get('title', 'Unknown'),
+                        "company": job_summary.get('company', 'Unknown'),
+                        "location": job_summary.get('location', 'Unknown'),
+                        "description": job_summary.get('description', ''),
+                        "original_length": job_summary.get('original_description_length', len(str(job.get('description', '')))),
+                        "summary_length": job_summary.get('summary_description_length', len(str(job_summary.get('description', '')))),
+                        "extraction_method": job_summary.get('extraction_method', 'smart_extraction'),
+                        "compression_ratio": job_summary.get('compression_ratio', 'N/A')
+                    }
+                    job_summaries.append(summary)
+                    
+                    # Add small delay between Groq requests to respect rate limits
+                    if os.getenv('GROQ_API_KEY') and i < len(jobs) - 1:
+                        await asyncio.sleep(2.5)  # 2.5 second delay between Groq requests for rate limiting
+                    
+                except Exception as e:
+                    logger.error(f"❌ Job {i+1}: Error in summarization: {str(e)}")
+                    # Ultra-basic fallback
+                    job_summary = create_concise_job_summary(job)
+                    summary = {
+                        "id": i + 1,
+                        "title": job.get('title', 'Unknown'),
+                        "company": job.get('company', 'Unknown'),
+                        "location": job.get('location', 'Unknown'),
+                        "description": job_summary.get('description', job.get('description', '')),
+                        "original_length": len(str(job.get('description', ''))),
+                        "summary_length": len(str(job_summary.get('description', ''))),
+                        "extraction_method": 'fallback_smart_extraction'
+                    }
+                    job_summaries.append(summary)
+        
+        if not job_summaries:
+            logger.error("No job summaries created, falling back to similarity matching")
+            return await batch_analyze_jobs_similarity(jobs, resume_data)
+        
+        # 🚀 DEBUG: Log summaries status
+        logger.info(f"🔍 OPENAI ENHANCED DEBUG: Created {len(job_summaries)} job summaries")
         
         # Calculate processing statistics
         total_original = sum(s.get('original_length', 0) for s in job_summaries)
@@ -2181,23 +3360,28 @@ async def batch_analyze_jobs_with_openai_enhanced(jobs: List[Dict], resume_data:
         logger.info(f"💰 Context extraction: {total_original} → {total_summary} chars ({savings} of original)")
         
         # 🎯 Stage 2: Use OpenAI for intelligent job-resume matching
+        logger.info("🔍 OPENAI ENHANCED DEBUG: STARTING OPENAI STAGE...")
         logger.info("🤖 Using OpenAI for intelligent job-resume matching...")
         
         # Prepare focused resume summary
         resume_summary = {
-            "skills": resume_data.get('skills', [])[:12],
+            "skills": resume_data.get('skills', [])[:12] if isinstance(resume_data.get('skills'), list) else [],
             "experience": [
                 {
-                    "title": exp.get('title', ''),
-                    "company": exp.get('company', ''),
-                    "technologies": exp.get('technologies', [])[:6],
-                    "duration": exp.get('duration', '')
+                    "title": exp.get('title', '') if isinstance(exp, dict) else '',
+                    "company": exp.get('company', '') if isinstance(exp, dict) else '',
+                    "technologies": exp.get('technologies', [])[:6] if isinstance(exp, dict) and isinstance(exp.get('technologies'), list) else [],
+                    "duration": exp.get('duration', '') if isinstance(exp, dict) else ''
                 }
-                for exp in resume_data.get('experience', [])[:3]
+                for exp in (resume_data.get('experience', []) if isinstance(resume_data.get('experience'), list) else [])[:3]
             ],
-            "education": [edu.get('degree', '') for edu in resume_data.get('education', [])][:2],
-            "summary": resume_data.get('summary', '')[:400] if resume_data.get('summary') else ''
+            "education": [edu.get('degree', '') if isinstance(edu, dict) else str(edu) for edu in (resume_data.get('education', []) if isinstance(resume_data.get('education'), list) else [])][:2],
+            "summary": str(resume_data.get('summary', ''))[:400] if resume_data.get('summary') else ''
         }
+        
+        # 🚀 DEBUG: Log resume summary
+        logger.info(f"🔍 OPENAI ENHANCED DEBUG: Resume skills: {len(resume_summary.get('skills', []))}")
+        logger.info(f"🔍 OPENAI ENHANCED DEBUG: Resume experience: {len(resume_summary.get('experience', []))}")
         
         # Create enhanced matching prompt
         newline = chr(10)
@@ -2210,7 +3394,7 @@ Experience: {len(resume_summary.get('experience', []))} positions
 Background: {resume_summary.get('summary', 'Not provided')}
 
 CONTEXT-RICH JOB SUMMARIES:
-{chr(10).join([f"{i+1}. {job['title']} at {job['company']}{newline}{job['description'][:300]}...{newline}" for i, job in enumerate(job_summaries)])}
+{chr(10).join([f"{i+1}. {job['title']} at {job['company']}{newline}{str(job['description'])[:300]}...{newline}" for i, job in enumerate(job_summaries)])}
 
 For each position, analyze:
 1. **Technical Alignment** (0-100): How well do the candidate's skills match the technical requirements?
@@ -2236,28 +3420,75 @@ Provide concise analysis in JSON format:
 Focus on accurate assessment based on the contextual job information provided.
 """
 
+        # 🚀 DEBUG: Log prompt details
+        logger.info(f"🔍 OPENAI ENHANCED DEBUG: Prompt length: {len(matching_prompt)} characters")
+        logger.info(f"🔍 OPENAI ENHANCED DEBUG: About to call OpenAI API...")
+
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": "You are an expert technical recruiter specializing in software engineering roles. Provide accurate, nuanced job-candidate matching analysis."},
                 {"role": "user", "content": matching_prompt}
             ],
-            max_tokens=1800,
+            max_tokens=2500,  # Increased from 1800 to ensure all jobs get analyzed
             temperature=0.3
         )
+        
+        # 🚀 DEBUG: Log OpenAI response
+        logger.info(f"🔍 OPENAI ENHANCED DEBUG: OpenAI API call successful!")
         
         # Parse and process results
         ai_response = response.choices[0].message.content
         logger.info(f"🤖 OpenAI enhanced matching response: {len(ai_response)} characters")
         
-        import json
-        try:
-            ai_analysis = json.loads(ai_response)
-        except json.JSONDecodeError:
-            logger.warning("OpenAI response not valid JSON, using fallback")
+        # 🔍 DEBUG: Log the actual response to understand the format
+        logger.info(f"🔍 OPENAI RESPONSE DEBUG: First 500 chars: {ai_response[:500]}")
+        
+        # Check if response is empty or None
+        if not ai_response or ai_response.strip() == "":
+            logger.warning("❌ OpenAI returned empty response, using fallback")
             return await batch_analyze_jobs_similarity(jobs, resume_data)
         
-        # Merge enhanced analysis with original job data
+        # Try to parse JSON response
+        import json
+        try:
+            # Try to parse as JSON directly
+            ai_analysis = json.loads(ai_response)
+            logger.info(f"✅ Successfully parsed JSON response with {len(ai_analysis)} items")
+        except json.JSONDecodeError as e:
+            logger.warning(f"❌ JSON parsing failed: {str(e)}")
+            logger.info(f"🔍 Attempting to extract JSON from response...")
+            
+            # Try to extract JSON from markdown code blocks or other formats
+            import re
+            
+            # Look for JSON in code blocks
+            json_match = re.search(r'```(?:json)?\s*(\[.*?\])\s*```', ai_response, re.DOTALL)
+            if json_match:
+                try:
+                    ai_analysis = json.loads(json_match.group(1))
+                    logger.info(f"✅ Extracted JSON from code block with {len(ai_analysis)} items")
+                except json.JSONDecodeError:
+                    logger.warning("❌ Failed to parse JSON from code block")
+                    logger.warning("OpenAI response not valid JSON, using fallback")
+                    return await batch_analyze_jobs_similarity(jobs, resume_data)
+            else:
+                # Look for JSON array pattern anywhere in the response
+                json_match = re.search(r'(\[.*?\])', ai_response, re.DOTALL)
+                if json_match:
+                    try:
+                        ai_analysis = json.loads(json_match.group(1))
+                        logger.info(f"✅ Extracted JSON array with {len(ai_analysis)} items")
+                    except json.JSONDecodeError:
+                        logger.warning("❌ Failed to parse extracted JSON array")
+                        logger.warning("OpenAI response not valid JSON, using fallback")
+                        return await batch_analyze_jobs_similarity(jobs, resume_data)
+                else:
+                    logger.warning("❌ No JSON found in OpenAI response")
+                    logger.warning("OpenAI response not valid JSON, using fallback")
+                    return await batch_analyze_jobs_similarity(jobs, resume_data)
+        
+        # Merge AI analysis with original job data
         analyzed_jobs = []
         for i, job in enumerate(jobs):
             ai_result = ai_analysis[i] if i < len(ai_analysis) else {}
@@ -2268,21 +3499,767 @@ Focus on accurate assessment based on the contextual job information provided.
                 "technical_alignment": ai_result.get('technical_alignment', 50),
                 "experience_match": ai_result.get('experience_match', 50),
                 "growth_potential": ai_result.get('growth_potential', 50),
-                "matching_skills": ai_result.get('matching_skills', []),
-                "missing_skills": ai_result.get('missing_skills', []),
+                "matching_skills": ai_result.get('matching_skills', []) if isinstance(ai_result.get('matching_skills'), list) else [],
+                "missing_skills": ai_result.get('missing_skills', []) if isinstance(ai_result.get('missing_skills'), list) else [],
                 "summary": ai_result.get('analysis', 'Enhanced analysis not available'),
                 "confidence": ai_result.get('confidence', 'medium'),
                 "ai_analysis": ai_result.get('analysis', ''),
-                "processing_method": "llama_openai_enhanced" if use_llama_extraction else "smart_openai_enhanced"
+                "processing_method": "openai_realistic_primary",  # Fixed to show correct method
+                "score_source": "openai_primary"  # Track that this came from OpenAI
             }
             analyzed_jobs.append(analyzed_job)
         
+        logger.info(f"🔍 OPENAI ENHANCED DEBUG: Completed successfully with {len(analyzed_jobs)} analyzed jobs")
         logger.info(f"✅ Enhanced two-stage analysis complete for {len(analyzed_jobs)} jobs")
         return analyzed_jobs
         
     except Exception as e:
         logger.error(f"Enhanced batch analysis failed: {str(e)}")
+        logger.error(f"🔍 OPENAI ENHANCED DEBUG: Exception in main try block")
+        logger.error(f"Full traceback: {traceback.format_exc()}")
         return await batch_analyze_jobs_similarity(jobs, resume_data)
+
+def detect_embedded_job_platform(url: str, page_content: Dict[str, Any]) -> str:
+    """
+    Detect embedded job board platforms from URL and page content
+    Returns platform name if detected, empty string otherwise
+    """
+    
+    url_lower = url.lower()
+    page_text = str(page_content.get('text', '')).lower()
+    
+    # Check URL patterns first
+    if 'ashby' in url_lower or 'ashby_jid=' in url_lower:
+        return 'ashby'
+    elif 'greenhouse.io' in url_lower or 'grnh.se' in url_lower:
+        return 'greenhouse'
+    elif 'lever.co' in url_lower or 'jobs.lever.co' in url_lower:
+        return 'lever'
+    elif 'myworkdayjobs.com' in url_lower or 'workday' in url_lower:
+        return 'workday'
+    elif 'bamboohr.com' in url_lower:
+        return 'bamboohr'
+    elif 'smartrecruiters.com' in url_lower:
+        return 'smartrecruiters'
+    elif 'jobvite.com' in url_lower:
+        return 'jobvite'
+    
+    # 🎯 ENHANCED: Check page content for embedded indicators (more comprehensive)
+    if ('ashby' in page_text and 
+        ('ashby_embed' in page_text or 'ashby-job-posting' in page_text or 'ashby_jid' in page_text)):
+        return 'ashby'
+    elif 'greenhouse' in page_text and ('gh_jid' in page_text or 'greenhouse-job' in page_text):
+        return 'greenhouse'
+    elif 'lever' in page_text and ('lever-job' in page_text or 'postings.lever.co' in page_text):
+        return 'lever'
+    elif 'workday' in page_text and ('workday-job' in page_text or 'myworkdayjobs' in page_text):
+        return 'workday'
+    elif 'bamboohr' in page_text and 'bamboo-job' in page_text:
+        return 'bamboohr'
+    
+    # 🚀 NEW: Additional detection for common patterns
+    # Check for specific div IDs and classes that indicate job board embeds
+    if ('id="ashby_embed"' in page_text or 'id=\'ashby_embed\'' in page_text or
+        'class="ashby-embed"' in page_text or 'ashby embed' in page_text):
+        logger.info("🎯 Detected Ashby embed div - jobs load dynamically")
+        return 'ashby'
+    
+    # Check for other job board indicators
+    if 'greenhouse.io/embed' in page_text or 'greenhouse_iframe' in page_text:
+        return 'greenhouse'
+    elif 'lever.co/embed' in page_text or 'lever_iframe' in page_text:
+        return 'lever'
+    elif 'workday-iframe' in page_text or 'workday/embed' in page_text:
+        return 'workday'
+    
+    return ''
+
+def extract_ashby_jobs_fallback(url: str) -> List[Dict[str, Any]]:
+    """
+    Fallback extraction specifically for Ashby job boards
+    Handles dynamic loading and Ashby-specific selectors
+    """
+    
+    try:
+        import requests
+        from bs4 import BeautifulSoup
+        
+        logger.info(f"🔧 Ashby fallback extraction for: {url}")
+        
+        # Enhanced headers for Ashby
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
+        }
+        
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        scraped_jobs = []
+        
+        # 🎯 PRIORITY 1: Check for Ashby embed div first
+        ashby_embed = soup.find('div', id='ashby_embed') or soup.find(class_='ashby-embed')
+        if ashby_embed:
+            logger.info("🎯 Found Ashby embed div - jobs are loaded dynamically via JavaScript")
+            
+            # Create an informative job entry for dynamic loading
+            company_name = extract_company_from_url(url)
+            return [{
+                "id": "ashby-dynamic-loading",
+                "title": f"💼 Current Openings at {company_name}",
+                "company": company_name,
+                "location": "Multiple Locations",
+                "url": url,
+                "description": f"""🚀 {company_name} uses Ashby job board platform with dynamic loading.
+
+📝 **How to see available positions:**
+1. **Visit the careers page directly**: {url}
+2. **Wait 3-5 seconds** for jobs to load via JavaScript
+3. **Refresh the Chrome extension** after jobs appear on the page
+4. **Alternative**: Check back later as new positions are posted regularly
+
+💡 **Why this happens:**
+Modern job boards like Ashby load content after the initial page render to improve performance. Our system detected the Ashby embed but jobs haven't loaded yet during the scan.
+
+🔍 **Company Info:**
+Based on their careers page, {company_name} appears to be actively hiring and mentions sending resumes to careers@{url.split('//')[1].split('/')[0]} for general inquiries.""",
+                "platform": "ashby",
+                "scraping_method": "ashby_dynamic_loading_detected",
+                "is_dynamic_loading": True,
+                "user_guidance": "Visit page directly and wait for jobs to load"
+            }]
+        
+        # 🎯 PRIORITY 2: Look for already-loaded Ashby jobs
+        ashby_selectors = [
+            'a[href*="ashby_jid="]',  # Direct Ashby job ID links
+            '.ashby-job-posting-brief',  # Ashby job posting containers
+            'a._undecorated_1aam4_1[href*="careers"]',  # Specific Ashby link classes
+            '._jobPosting_12ylk_379',  # Ashby job posting divs
+            '.ashby-embed a',  # Links within Ashby embed
+            '[data-ashby-job-id]',  # Data attributes for Ashby jobs
+            'a[href*="careers/?ashby_jid="]',  # Career page with Ashby job ID
+            'div[class*="ashby"] a',  # Any div with ashby class containing links
+            '.ashby-job a'  # Ashby job links
+        ]
+        
+        for selector in ashby_selectors:
+            elements = soup.select(selector)
+            logger.info(f"Ashby selector '{selector}' found {len(elements)} elements")
+            
+            for i, element in enumerate(elements):
+                try:
+                    # Extract job data from Ashby elements
+                    if element.name == 'a':
+                        link = element
+                        job_container = element
+                    else:
+                        link = element.find_parent('a') or element.find('a')
+                        job_container = element
+                    
+                    if not link:
+                        continue
+                    
+                    href = link.get('href', '')
+                    
+                    # Skip email links and invalid URLs
+                    if ('mailto:' in href or 
+                        href == url or 
+                        not href or
+                        href.startswith('#')):
+                        continue
+                    
+                    # Make absolute URL
+                    if href.startswith('/?'):
+                        job_url = url.rstrip('/') + href
+                    elif href.startswith('/'):
+                        job_url = url.rstrip('/') + href
+                    elif href.startswith('http'):
+                        job_url = href
+                    else:
+                        job_url = f"{url}?{href}" if '=' in href else url
+                    
+                    # Extract title from Ashby structure
+                    title = ""
+                    title_selectors = [
+                        '._title_12ylk_383',  # Ashby title class
+                        '.ashby-job-posting-brief-title',
+                        'h3',
+                        '.job-title'
+                    ]
+                    
+                    for title_sel in title_selectors:
+                        title_el = job_container.select_one(title_sel)
+                        if title_el and title_el.get_text(strip=True):
+                            title = title_el.get_text(strip=True)
+                            break
+                    
+                    if not title:
+                        title = link.get_text(strip=True)
+                    
+                    # Extract details (location, department, type)
+                    details = ""
+                    details_selectors = [
+                        '._details_12ylk_389',  # Ashby details class
+                        '.ashby-job-posting-brief-details',
+                        '.job-details',
+                        '.job-meta'
+                    ]
+                    
+                    for details_sel in details_selectors:
+                        details_el = job_container.select_one(details_sel)
+                        if details_el and details_el.get_text(strip=True):
+                            details = details_el.get_text(strip=True)
+                            break
+                    
+                    # Parse location from details (format: "Department • Location • Type • Schedule")
+                    location = "Location TBD"
+                    if details and '•' in details:
+                        parts = [part.strip() for part in details.split('•')]
+                        if len(parts) >= 2:
+                            location = parts[1]  # Second part is usually location
+                    
+                    # Validate job data - stricter validation
+                    if (title and len(title) > 3 and 
+                        title.lower() not in ['careers', 'jobs', 'apply', 'search', 'home', 'contact'] and
+                        not title.startswith('@') and  # Skip email addresses
+                        job_url and job_url != url and 'mailto:' not in job_url):
+                        
+                        scraped_job = {
+                            "id": f"ashby-job-{len(scraped_jobs)+1}",
+                            "title": title[:100],
+                            "company": extract_company_from_url(url),
+                            "location": location,
+                            "url": job_url,
+                            "description": f"Ashby job posting: {title}. Department: {details if details else 'Not specified'}. Full details available at job URL.",
+                            "scraping_method": f"ashby_fallback_{selector}",
+                            "job_details": details,
+                            "platform": "ashby"
+                        }
+                        scraped_jobs.append(scraped_job)
+                        logger.info(f"✅ Extracted Ashby job: {title} - {location}")
+                        
+                        # Limit to prevent overwhelming results
+                        if len(scraped_jobs) >= 20:
+                            break
+                    else:
+                        logger.debug(f"Skipped invalid job: title='{title}', url='{job_url}'")
+                    
+                except Exception as e:
+                    logger.warning(f"Error processing Ashby element {i}: {str(e)}")
+                    continue
+            
+            if scraped_jobs:
+                break  # Stop at first successful selector
+        
+        # If no jobs found but we know it's Ashby, provide helpful guidance
+        if not scraped_jobs:
+            logger.info("No loaded jobs found - likely dynamic loading scenario")
+            company_name = extract_company_from_url(url)
+            return [{
+                "id": "ashby-loading-guidance",
+                "title": f"🕒 Jobs Loading at {company_name}",
+                "company": company_name,
+                "location": "Various Locations",
+                "url": url,
+                "description": f"""⏰ **Dynamic Job Loading Detected**
+
+{company_name} uses Ashby job board platform. If you're not seeing job listings:
+
+🔄 **Try these steps:**
+1. **Wait**: Jobs may take 3-10 seconds to load
+2. **Refresh**: Refresh your browser and wait for content
+3. **Check directly**: Visit {url} in a new tab
+4. **Retry extension**: Use the Chrome extension after jobs appear
+
+💼 **Alternative contact**: 
+If jobs don't appear, you can send your resume directly to their careers email.
+
+🔍 **Technical note**: This site loads job postings via JavaScript after the initial page render.""",
+                "platform": "ashby",
+                "scraping_method": "ashby_loading_guidance",
+                "is_dynamic_loading": True
+            }]
+        
+        logger.info(f"Ashby extraction completed: {len(scraped_jobs)} jobs found")
+        return scraped_jobs
+        
+    except Exception as e:
+        logger.error(f"Ashby fallback extraction failed: {str(e)}")
+        return []
+
+def extract_greenhouse_jobs_fallback(url: str) -> List[Dict[str, Any]]:
+    """Fallback extraction for Greenhouse job boards"""
+    
+    try:
+        import requests
+        from bs4 import BeautifulSoup
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+        
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        scraped_jobs = []
+        
+        # Greenhouse-specific selectors
+        greenhouse_selectors = [
+            'a[href*="gh_jid="]',
+            '.opening',
+            '.job-post',
+            'a[href*="greenhouse.io"]'
+        ]
+        
+        for selector in greenhouse_selectors:
+            elements = soup.select(selector)
+            if elements:
+                for i, element in enumerate(elements[:10]):
+                    title = element.get_text(strip=True)
+                    href = element.get('href', '')
+                    
+                    if title and href:
+                        scraped_job = {
+                            "id": f"greenhouse-{i+1}",
+                            "title": title[:100],
+                            "company": extract_company_from_url(url),
+                            "location": "Location TBD",
+                            "url": href if href.startswith('http') else url + href,
+                            "description": f"Greenhouse job: {title}",
+                            "platform": "greenhouse"
+                        }
+                        scraped_jobs.append(scraped_job)
+                
+                if scraped_jobs:
+                    break
+        
+        return scraped_jobs
+        
+    except Exception as e:
+        logger.error(f"Greenhouse fallback failed: {str(e)}")
+        return []
+
+def extract_lever_jobs_fallback(url: str) -> List[Dict[str, Any]]:
+    """Fallback extraction for Lever job boards"""
+    
+    try:
+        import requests
+        from bs4 import BeautifulSoup
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+        
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        scraped_jobs = []
+        
+        # Lever-specific selectors
+        lever_selectors = [
+            '.posting',
+            '.job',
+            'a[href*="lever.co"]'
+        ]
+        
+        for selector in lever_selectors:
+            elements = soup.select(selector)
+            if elements:
+                for i, element in enumerate(elements[:10]):
+                    title_el = element.find(['h3', 'h2', 'h4']) or element
+                    title = title_el.get_text(strip=True)
+                    
+                    link = element if element.name == 'a' else element.find('a')
+                    href = link.get('href', '') if link else ''
+                    
+                    if title and href:
+                        scraped_job = {
+                            "id": f"lever-{i+1}",
+                            "title": title[:100],
+                            "company": extract_company_from_url(url),
+                            "location": "Location TBD",
+                            "url": href if href.startswith('http') else url + href,
+                            "description": f"Lever job: {title}",
+                            "platform": "lever"
+                        }
+                        scraped_jobs.append(scraped_job)
+                
+                if scraped_jobs:
+                    break
+        
+        return scraped_jobs
+        
+    except Exception as e:
+        logger.error(f"Lever fallback failed: {str(e)}")
+        return []
+
+def extract_workday_jobs_fallback(url: str) -> List[Dict[str, Any]]:
+    """Fallback extraction for Workday job boards"""
+    
+    try:
+        import requests
+        from bs4 import BeautifulSoup
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+        
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        scraped_jobs = []
+        
+        # Workday-specific selectors
+        workday_selectors = [
+            'a[href*="job/"]',
+            '[data-automation-id*="job"]',
+            '.jobPosting'
+        ]
+        
+        for selector in workday_selectors:
+            elements = soup.select(selector)
+            if elements:
+                for i, element in enumerate(elements[:10]):
+                    title = element.get_text(strip=True)
+                    href = element.get('href', '') if element.name == 'a' else element.find('a', href=True)
+                    href = href.get('href', '') if hasattr(href, 'get') else str(href) if href else ''
+                    
+                    if title and href:
+                        scraped_job = {
+                            "id": f"workday-{i+1}",
+                            "title": title[:100],
+                            "company": extract_company_from_url(url),
+                            "location": "Location TBD",
+                            "url": href if href.startswith('http') else url + href,
+                            "description": f"Workday job: {title}",
+                            "platform": "workday"
+                        }
+                        scraped_jobs.append(scraped_job)
+                
+                if scraped_jobs:
+                    break
+        
+        return scraped_jobs
+        
+    except Exception as e:
+        logger.error(f"Workday fallback failed: {str(e)}")
+        return []
+
+def extract_generic_jobs_fallback(url: str) -> List[Dict[str, Any]]:
+    """Generic fallback extraction for unknown job sites"""
+    
+    try:
+        import requests
+        from bs4 import BeautifulSoup
+        
+        logger.info(f"🔍 Attempting generic job scraping from: {url}")
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+        
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        scraped_jobs = []
+        
+        # Generic job link selectors
+        job_selectors = [
+            # Traditional job URL patterns
+            'a[href*="job"]', 'a[href*="position"]', 'a[href*="career"]',
+            'a[href*="opening"]', 'a[href*="role"]', 'a[href*="opportunity"]',
+            
+            # Modern job board ID patterns (Ashby, Greenhouse, etc.)
+            'a[href*="jid="]', 'a[href*="ashby_jid="]', 'a[href*="gh_jid="]',
+            'a[href*="lever_id="]', 'a[href*="job_id="]', 'a[href*="posting_id="]',
+            
+            # Job board specific URL patterns
+            'a[href*="greenhouse.io"]', 'a[href*="lever.co"]', 'a[href*="workday"]',
+            'a[href*="bamboohr"]', 'a[href*="smartrecruiters"]', 'a[href*="jobvite"]',
+            
+            # CSS class patterns for job items
+            '.job-link', '.position-link', '.career-link', '.opening-link',
+            '.job-item a', '.position-item a', '.career-item a', '.opening-item a',
+            
+            # Modern job board CSS class patterns
+            'a[class*="job"]', 'a[class*="position"]', 'a[class*="career"]',
+            'a[class*="posting"]', 'a[class*="opening"]', 'a[class*="role"]',
+            
+            # Ashby specific patterns (common class patterns)
+            'a[class*="undecorated"]', 'a[class*="jobPosting"]', '.ashby-job-posting-brief a',
+            'div[class*="jobPosting"] a', 'div[class*="job-posting"] a',
+            
+            # Data attribute patterns
+            '[data-test*="job"] a', '[data-test*="position"] a', '[data-testid*="job"] a',
+            '[data-job-id] a', '[data-posting-id] a', '[data-role-id] a',
+            
+            # Title-based selectors
+            '.jobTitle a', '.job-title a', '.position-title a', '.role-title a',
+            
+            # Generic container patterns that might contain job links
+            'article a', '.listing a', '.post a', '[role="listitem"] a'
+        ]
+        
+        for selector in job_selectors:
+            job_links = soup.select(selector)
+            if job_links:
+                logger.info(f"✅ Found {len(job_links)} job links using selector: {selector}")
+                
+                for i, link in enumerate(job_links[:10]):  # Limit to first 10
+                    href = link.get('href', '')
+                    title = link.get_text(strip=True)
+                    
+                    # Enhanced URL validation
+                    if not href or not title or len(title) < 3:
+                        continue
+                    
+                    # Skip invalid URLs
+                    if (href.startswith('mailto:') or 
+                        href.startswith('tel:') or 
+                        href.startswith('#') or
+                        href == '/' or
+                        href == url):
+                        continue
+                    
+                    # Check if it's a valid job-related link
+                    href_lower = href.lower()
+                    title_lower = title.lower()
+                    
+                    # Skip if title suggests it's not a job (common false positives)
+                    skip_titles = ['home', 'about', 'contact', 'privacy', 'terms', 'login', 'sign up', 'search', 'filter']
+                    if any(skip_word in title_lower for skip_word in skip_titles) and len(title) < 30:
+                        continue
+                    
+                    # Make absolute URL
+                    if href.startswith('/'):
+                        job_url = url.rstrip('/') + href
+                    elif href.startswith('http'):
+                        job_url = href
+                    else:
+                        job_url = url.rstrip('/') + '/' + href
+                    
+                    scraped_job = {
+                        "id": f"generic-{len(scraped_jobs)+1}",
+                        "title": title[:100],  # Limit title length
+                        "company": extract_company_from_url(url),
+                        "location": "Location TBD",
+                        "url": job_url,
+                        "description": f"Job found via generic scraping: {title}",
+                        "scraping_method": f"generic_{selector.replace('[', '').replace(']', '').replace('*', '')}",
+                        "platform": "unknown"
+                    }
+                    scraped_jobs.append(scraped_job)
+                
+                if scraped_jobs:
+                    break  # Stop at first successful selector
+        
+        logger.info(f"Generic extraction completed: {len(scraped_jobs)} jobs found")
+        return scraped_jobs
+        
+    except Exception as e:
+        logger.error(f"❌ Generic fallback extraction failed: {str(e)}")
+        return []
+
+def extract_deutsche_bank_job(soup: BeautifulSoup, job: Dict[str, Any], job_url: str) -> Dict[str, Any]:
+    """
+    Deutsche Bank careers site extraction with dynamic content handling
+    Deutsche Bank uses a SPA (Single Page Application) where job details are loaded via JavaScript
+    """
+    
+    try:
+        logger.info(f"🏦 Extracting Deutsche Bank job from: {job_url}")
+        
+        # Deutsche Bank specific selectors
+        # The site structure is: careers.db.com/professionals/search-roles/#/professional/job/{job_id}
+        
+        # Extract job ID from URL for potential API calls
+        job_id = None
+        if '/job/' in job_url:
+            job_id = job_url.split('/job/')[-1]
+            logger.info(f"🆔 Extracted job ID: {job_id}")
+        
+        # Try to extract basic info from the initial HTML
+        # Deutsche Bank often has some metadata in the initial page
+        
+        # Title extraction - try multiple approaches
+        title_found = False
+        
+        # Method 1: Look for job title in meta tags
+        meta_title = soup.find('meta', property='og:title')
+        if meta_title and meta_title.get('content'):
+            potential_title = meta_title.get('content').strip()
+            if potential_title and len(potential_title) > 5 and 'Deutsche Bank' not in potential_title:
+                job["title"] = potential_title
+                title_found = True
+                logger.info(f"📋 Found title in meta tag: {potential_title}")
+        
+        # Method 2: Look for title in page title
+        if not title_found:
+            title_tag = soup.find('title')
+            if title_tag:
+                title_text = title_tag.get_text().strip()
+                # Clean up the title
+                if ' - ' in title_text:
+                    potential_title = title_text.split(' - ')[0].strip()
+                    if potential_title and len(potential_title) > 5:
+                        job["title"] = potential_title
+                        title_found = True
+                        logger.info(f"📋 Found title in page title: {potential_title}")
+        
+        # Method 3: Look for structured data
+        if not title_found:
+            script_tags = soup.find_all('script', type='application/ld+json')
+            for script in script_tags:
+                try:
+                    import json
+                    data = json.loads(script.string)
+                    if isinstance(data, dict) and data.get('title'):
+                        job["title"] = data['title']
+                        title_found = True
+                        logger.info(f"📋 Found title in structured data: {data['title']}")
+                        break
+                except:
+                    continue
+        
+        # Set company
+        job["company"] = "Deutsche Bank"
+        
+        # Try to extract location from various sources
+        location_selectors = [
+            '[data-testid*="location"]',
+            '.location',
+            '.job-location',
+            '.city'
+        ]
+        
+        for selector in location_selectors:
+            location_el = soup.select_one(selector)
+            if location_el and location_el.get_text().strip():
+                job["location"] = location_el.get_text().strip()
+                logger.info(f"📍 Found location: {job['location']}")
+                break
+        
+        # For Deutsche Bank, the main content is loaded dynamically
+        # We need to provide a meaningful description that indicates this
+        
+        # Try to extract any available content from the initial page
+        content_areas = []
+        
+        # Look for any job-related content in the initial HTML
+        content_selectors = [
+            '.job-description',
+            '.job-content',
+            '.description',
+            '.content',
+            'main',
+            '.main-content',
+            '#content'
+        ]
+        
+        for selector in content_selectors:
+            content_el = soup.select_one(selector)
+            if content_el:
+                text_content = content_el.get_text().strip()
+                if text_content and len(text_content) > 50:
+                    content_areas.append(text_content[:500])  # Limit to 500 chars
+        
+        # Build description
+        if content_areas:
+            # Use the longest content area found
+            best_content = max(content_areas, key=len)
+            job["description"] = f"Position: {job.get('title', 'Software Engineer')} at Deutsche Bank\n\n{best_content}"
+        else:
+            # Fallback description for Deutsche Bank jobs
+            job["description"] = f"""Position: {job.get('title', 'Software Engineer')} at Deutsche Bank
+
+Deutsche Bank is a leading global investment bank with a strong and profitable private clients franchise. We are seeking talented professionals to join our technology teams.
+
+Key areas of focus:
+• Software development and engineering
+• Financial technology solutions
+• Digital transformation initiatives
+• Risk management systems
+• Trading platforms and analytics
+
+This role offers the opportunity to work with cutting-edge technology in the financial services industry, contributing to Deutsche Bank's digital transformation and innovation initiatives.
+
+Location: {job.get('location', 'Various locations globally')}
+
+Note: This is a dynamic job posting. For complete details, please visit the original job posting at Deutsche Bank careers."""
+        
+        # Set default location if not found
+        if not job.get("location"):
+            job["location"] = "Various Locations"
+        
+        # Set default title if not found
+        if not job.get("title"):
+            job["title"] = "Software Engineer"
+        
+        # Add Deutsche Bank specific metadata
+        job["extraction_method"] = "deutsche_bank_enhanced"
+        job["requires_dynamic_loading"] = True
+        job["job_id"] = job_id
+        
+        logger.info(f"✅ Deutsche Bank extraction completed: {job['title']} at {job['company']}")
+        logger.info(f"📄 Description length: {len(job.get('description', ''))}")
+        
+    except Exception as e:
+        logger.error(f"❌ Error extracting Deutsche Bank job: {str(e)}")
+        # Provide fallback data
+        job["title"] = job.get("title") or "Software Engineer"
+        job["company"] = "Deutsche Bank"
+        job["location"] = job.get("location") or "Various Locations"
+        job["description"] = f"Deutsche Bank {job['title']} position. Please visit the original job posting for complete details."
+        job["extraction_method"] = "deutsche_bank_fallback"
+    
+    return job
+
+def extract_generic_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, Any]:
+    """Universal job extraction for any unknown site"""
+    
+    try:
+        # Generic title extraction
+        title_selectors = ['h1', 'h2', '.job-title', '.title', '.position-title', '.role-title']
+        for selector in title_selectors:
+            title_el = soup.select_one(selector)
+            if title_el and title_el.get_text().strip():
+                job["title"] = title_el.get_text().strip()
+                break
+        
+        # Generic company extraction
+        title_tag = soup.find('title')
+        if title_tag:
+            title_text = title_tag.get_text()
+            parts = title_text.split(' - ')
+            if len(parts) > 1:
+                job["company"] = parts[-1].strip()
+        
+        # Generic location extraction
+        location_selectors = ['.location', '.job-location', '.city', '.address']
+        for selector in location_selectors:
+            location_el = soup.select_one(selector)
+            if location_el and location_el.get_text().strip():
+                job["location"] = location_el.get_text().strip()
+                break
+        
+        # Use universal content extraction
+        job = extract_universal_job_content(soup, job, "generic")
+        
+    except Exception as e:
+        logger.error(f"Error in generic extraction: {str(e)}")
+        job["description"] = f"Job details (generic extraction error: {str(e)})"
+    
+    return job
 
 if __name__ == "__main__":
     print("Starting Enhanced Bulk-Scanner API server...")
@@ -2311,10 +4288,15 @@ if __name__ == "__main__":
     print(f"\n💰 Cost per 50 jobs: $0.02 (96% savings vs old system)")
     print(f"🚀 Quality ranking: Groq > Ollama > HuggingFace > Smart Extraction")
     
+    # Production-ready server configuration
+    port = int(os.getenv("PORT", 8000))
+    host = os.getenv("HOST", "0.0.0.0")
+    reload = os.getenv("DEBUG", "false").lower() == "true"
+    
     uvicorn.run(
         "main_simple:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
+        host=host,
+        port=port,
+        reload=reload,
         log_level="info"
     ) 
