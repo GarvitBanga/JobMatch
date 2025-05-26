@@ -1,4 +1,4 @@
-// Enhanced Options page with Career Insights for Bulk-Scanner Chrome Extension
+// Options page for JobMatch extension
 
 document.addEventListener('DOMContentLoaded', function() {
     loadSettings();
@@ -22,9 +22,7 @@ function setupEventListeners() {
 async function loadSettings() {
     try {
         const settings = await chrome.storage.sync.get([
-            'apiEndpoint',
             'matchThreshold', 
-            'autoScan', 
             'resumeData',
             'resumeFileName',
             'resumeUploadDate',
@@ -32,9 +30,7 @@ async function loadSettings() {
         ]);
         
         // Populate form fields
-        document.getElementById('apiEndpoint').value = settings.apiEndpoint || 'https://jobmatch-production.up.railway.app/api/v1';
         document.getElementById('matchThreshold').value = settings.matchThreshold || 70;
-        document.getElementById('autoScan').checked = settings.autoScan || false;
         
         // Show resume info and insights if available
         if (settings.resumeData) {
@@ -57,9 +53,7 @@ async function saveSettings(event) {
     
     try {
         const settings = {
-            apiEndpoint: document.getElementById('apiEndpoint').value,
-            matchThreshold: parseInt(document.getElementById('matchThreshold').value),
-            autoScan: document.getElementById('autoScan').checked
+            matchThreshold: parseInt(document.getElementById('matchThreshold').value)
         };
         
         await chrome.storage.sync.set(settings);
@@ -76,9 +70,7 @@ async function resetSettings() {
         await chrome.storage.sync.clear();
         
         // Reset form to defaults
-        document.getElementById('apiEndpoint').value = 'https://jobmatch-production.up.railway.app/api/v1';
         document.getElementById('matchThreshold').value = 70;
-        document.getElementById('autoScan').checked = false;
         document.getElementById('resumeFile').value = '';
         
         // Hide resume info and insights
@@ -95,8 +87,7 @@ async function resetSettings() {
 
 async function testConnection() {
     try {
-        const settings = await chrome.storage.sync.get(['apiEndpoint']);
-        const apiEndpoint = settings.apiEndpoint || 'https://jobmatch-production.up.railway.app/api/v1';
+        const apiEndpoint = 'https://jobmatch-production.up.railway.app/api/v1';
         
         showStatus('Testing connection...', 'info');
         
@@ -107,16 +98,16 @@ async function testConnection() {
         if (response.ok) {
             const data = await response.json();
             showStatus(
-                `✅ Connection successful! Features: Resume Processing: ${data.features.resume_processing}, LLM Matching: ${data.features.llm_matching}`, 
+                `Connection successful! Features: Resume Processing: ${data.features.resume_processing}, LLM Matching: ${data.features.llm_matching}`, 
                 'success'
             );
         } else {
-            showStatus(`❌ Connection failed: ${response.status}`, 'error');
+            showStatus(`Connection failed: ${response.status}`, 'error');
         }
         
     } catch (error) {
         console.error('Connection test failed:', error);
-        showStatus(`❌ Connection failed: ${error.message}`, 'error');
+        showStatus(`Connection failed: ${error.message}`, 'error');
     }
 }
 
@@ -125,7 +116,7 @@ async function handleResumeUpload(event) {
     if (!file) return;
     
     try {
-        showStatus('Processing resume with AI insights...', 'info');
+        showStatus('Processing resume...', 'info');
         
         // Validate file type
         const allowedTypes = ['.pdf', '.doc', '.docx', '.txt'];
@@ -135,16 +126,12 @@ async function handleResumeUpload(event) {
             throw new Error(`Unsupported file type. Allowed: ${allowedTypes.join(', ')}`);
         }
         
-        // Get API endpoint
-        const settings = await chrome.storage.sync.get(['apiEndpoint']);
-        const apiEndpoint = settings.apiEndpoint || 'https://jobmatch-production.up.railway.app/api/v1';
+        const apiEndpoint = 'https://jobmatch-production.up.railway.app/api/v1';
         
-        // Create FormData for file upload
         const formData = new FormData();
         formData.append('file', file);
         formData.append('user_id', 'chrome-extension-user');
         
-        // Upload to backend for processing
         const response = await fetch(`${apiEndpoint}/upload/resume`, {
             method: 'POST',
             body: formData
@@ -157,7 +144,6 @@ async function handleResumeUpload(event) {
         const result = await response.json();
         
         if (result.success) {
-            // Store enhanced resume data in Chrome storage
             await chrome.storage.sync.set({
                 resumeData: result.structured_data,
                 resumeFileName: file.name,
@@ -168,17 +154,15 @@ async function handleResumeUpload(event) {
             showResumeInfo(file.name, new Date().toISOString(), result.processing_method);
             
             const insightsMessage = result.insights_generated ? 
-                'with AI career insights' : 'without insights (no OpenAI key)';
+                'with career insights' : 'basic processing';
             
             showStatus(
-                `✅ Resume processed successfully using ${result.processing_method} method ${insightsMessage}!`, 
+                `Resume processed successfully (${insightsMessage})`, 
                 'success'
             );
             
-            // Show structured data preview
             showResumePreview(result.structured_data);
             
-            // Show career insights if generated
             if (result.structured_data.career_insights) {
                 showCareerInsights(result.structured_data.career_insights);
             }
@@ -189,20 +173,18 @@ async function handleResumeUpload(event) {
         
     } catch (error) {
         console.error('Resume upload failed:', error);
-        showStatus(`❌ Resume upload failed: ${error.message}`, 'error');
+        showStatus(`Resume upload failed: ${error.message}`, 'error');
     }
 }
 
 function showResumeInfo(fileName, uploadDate, processingMethod) {
     const container = document.querySelector('.form-group:has(#resumeFile)');
     
-    // Remove existing info if present
     const existingInfo = container.querySelector('.resume-info');
     if (existingInfo) {
         existingInfo.remove();
     }
     
-    // Create resume info display
     const resumeInfo = document.createElement('div');
     resumeInfo.className = 'resume-info';
     resumeInfo.style.cssText = `
@@ -216,13 +198,13 @@ function showResumeInfo(fileName, uploadDate, processingMethod) {
     
     const uploadDateFormatted = new Date(uploadDate).toLocaleDateString();
     const methodBadge = processingMethod === 'llm_enhanced' ? 
-        '<span style="background: #10b981; color: white; padding: 2px 6px; border-radius: 4px; font-size: 11px;">AI Enhanced</span>' :
+        '<span style="background: #10b981; color: white; padding: 2px 6px; border-radius: 4px; font-size: 11px;">Enhanced</span>' :
         '<span style="background: #6b7280; color: white; padding: 2px 6px; border-radius: 4px; font-size: 11px;">Basic</span>';
     
     resumeInfo.innerHTML = `
         <div style="display: flex; justify-content: space-between; align-items: center;">
             <div>
-                <strong>📄 Current Resume:</strong> ${fileName} ${methodBadge}<br>
+                <strong>Current Resume:</strong> ${fileName} ${methodBadge}<br>
                 <small style="color: #6b7280;">Uploaded: ${uploadDateFormatted}</small>
             </div>
             <button type="button" id="removeResumeBtn" style="
@@ -240,12 +222,10 @@ function showResumeInfo(fileName, uploadDate, processingMethod) {
     
     container.appendChild(resumeInfo);
     
-    // Add remove functionality
     document.getElementById('removeResumeBtn').addEventListener('click', removeResume);
 }
 
 function showCareerInsights(insights) {
-    // Remove existing insights
     hideCareerInsights();
     
     const container = document.querySelector('.container');
@@ -305,7 +285,7 @@ function showCareerInsights(insights) {
     
     insightsContainer.innerHTML = `
         <h2 style="margin-top: 0; display: flex; align-items: center; gap: 10px;">
-            🧠 AI Career Insights
+            Career Insights
             <button type="button" id="hideInsightsBtn" style="
                 background: rgba(255,255,255,0.2);
                 color: white;
@@ -320,42 +300,41 @@ function showCareerInsights(insights) {
         
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px;">
             <div>
-                <h3 style="margin: 0 0 10px 0; color: #fbbf24;">📊 Career Profile</h3>
+                <h3 style="margin: 0 0 10px 0; color: #fbbf24;">Career Profile</h3>
                 <p><strong>Level:</strong> ${currentLevel}</p>
                 <p><strong>Experience:</strong> ${experience} years</p>
                 <p><strong>Salary Range:</strong> ${estimatedRange}</p>
             </div>
             
             <div>
-                <h3 style="margin: 0 0 10px 0; color: #34d399;">💪 Your Strengths</h3>
+                <h3 style="margin: 0 0 10px 0; color: #34d399;">Your Strengths</h3>
                 <p>${strongSkills.slice(0, 5).join(', ') || 'Analysis in progress'}</p>
                 
-                <h3 style="margin: 15px 0 10px 0; color: #fbbf24;">🏭 Top Industries</h3>
+                <h3 style="margin: 15px 0 10px 0; color: #fbbf24;">Top Industries</h3>
                 <div>${industryHTML || 'Analyzing market fit...'}</div>
             </div>
         </div>
         
         <div style="margin-top: 20px;">
-            <h3 style="margin: 0 0 10px 0; color: #60a5fa;">🎯 Recommended Job Profiles</h3>
+            <h3 style="margin: 0 0 10px 0; color: #60a5fa;">Recommended Job Profiles</h3>
             ${profilesHTML || '<p>Generating personalized job recommendations...</p>'}
         </div>
         
         <div style="margin-top: 20px;">
-            <h3 style="margin: 0 0 10px 0; color: #f87171;">📈 Skills to Learn</h3>
+            <h3 style="margin: 0 0 10px 0; color: #f87171;">Skills to Learn</h3>
             <div style="margin-top: 10px;">
                 ${recommendedSkillsHTML || '<p>Analyzing skill gaps...</p>'}
             </div>
         </div>
         
         <div style="margin-top: 20px; padding: 15px; background: rgba(255,255,255,0.1); border-radius: 8px; font-size: 13px;">
-            💡 <strong>Pro Tip:</strong> These insights are generated by AI analysis of your resume and current market trends. 
-            Use them to optimize your job search and identify growth opportunities!
+            <strong>Note:</strong> These insights are generated from analysis of your resume and market trends. 
+            Use them to optimize your job search and identify opportunities.
         </div>
     `;
     
     container.appendChild(insightsContainer);
     
-    // Add hide functionality
     document.getElementById('hideInsightsBtn').addEventListener('click', hideCareerInsights);
 }
 
@@ -394,10 +373,8 @@ async function removeResume() {
 }
 
 function showResumePreview(resumeData) {
-    // Create a modal or expandable section to show parsed resume data
     const container = document.querySelector('.container');
     
-    // Remove existing preview
     const existingPreview = document.getElementById('resumePreview');
     if (existingPreview) {
         existingPreview.remove();
@@ -419,15 +396,14 @@ function showResumePreview(resumeData) {
     const experienceCount = resumeData.experience ? resumeData.experience.length : 0;
     const educationCount = resumeData.education ? resumeData.education.length : 0;
     
-    // Check if career insights are available
     const hasInsights = resumeData.career_insights && Object.keys(resumeData.career_insights).length > 0;
     const insightsIndicator = hasInsights ? 
-        '<span style="background: #10b981; color: white; padding: 2px 6px; border-radius: 4px; font-size: 11px; margin-left: 10px;">AI Enhanced</span>' :
-        '<span style="background: #6b7280; color: white; padding: 2px 6px; border-radius: 4px; font-size: 11px; margin-left: 10px;">Basic Parse</span>';
+        '<span style="background: #10b981; color: white; padding: 2px 6px; border-radius: 4px; font-size: 11px; margin-left: 10px;">Enhanced</span>' :
+        '<span style="background: #6b7280; color: white; padding: 2px 6px; border-radius: 4px; font-size: 11px; margin-left: 10px;">Basic</span>';
     
     preview.innerHTML = `
         <h3 style="margin-top: 0; color: #374151;">
-            📊 Resume Analysis Preview ${insightsIndicator}
+            Resume Preview ${insightsIndicator}
         </h3>
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; font-size: 14px;">
             <div>
@@ -454,7 +430,7 @@ function showResumePreview(resumeData) {
         
         ${hasInsights ? `
             <div style="margin-top: 15px; padding: 10px; background: #ecfdf5; border: 1px solid #d1fae5; border-radius: 6px;">
-                <strong style="color: #065f46;">🎯 AI Insights Available:</strong>
+                <strong style="color: #065f46;">Insights Available:</strong>
                 <ul style="margin: 5px 0; padding-left: 20px; color: #047857;">
                     <li>${resumeData.career_insights.recommended_job_profiles?.length || 0} recommended job profiles</li>
                     <li>${resumeData.career_insights.skill_analysis?.recommended_skills?.length || 0} skill recommendations</li>
@@ -463,7 +439,7 @@ function showResumePreview(resumeData) {
             </div>
         ` : `
             <div style="margin-top: 15px; padding: 10px; background: #fef3c7; border: 1px solid #fbbf24; border-radius: 6px;">
-                <strong style="color: #92400e;">💡 Tip:</strong> Set up OpenAI API key in your backend to get AI-powered career insights!
+                <strong style="color: #92400e;">Note:</strong> Enhanced processing provides additional career insights.
             </div>
         `}
         
@@ -518,4 +494,4 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 });
 
-console.log('Enhanced Options page with Career Insights loaded'); 
+console.log('Options page loaded'); 

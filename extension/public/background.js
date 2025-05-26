@@ -1,6 +1,4 @@
-// Background service worker for Bulk-Scanner Résumé Matcher Chrome Extension
-
-console.log('Bulk-Scanner background service worker loaded');
+console.log('Background service worker loaded');
 
 // Handle extension installation
 chrome.runtime.onInstalled.addListener((details) => {
@@ -10,7 +8,6 @@ chrome.runtime.onInstalled.addListener((details) => {
     // Set default settings
     chrome.storage.sync.set({
       apiEndpoint: 'https://jobmatch-production.up.railway.app/api/v1',
-      autoScan: false,
       matchThreshold: 40
     });
   }
@@ -26,7 +23,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true; // Keep message channel open for async response
       
     case 'GET_SETTINGS':
-      chrome.storage.sync.get(['apiEndpoint', 'autoScan', 'matchThreshold', 'resumeData'], sendResponse);
+      chrome.storage.sync.get(['matchThreshold', 'resumeData'], sendResponse);
       return true;
       
     case 'SAVE_SETTINGS':
@@ -36,21 +33,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
       
     case 'GET_LAST_RESULTS':
-      // 🚀 NEW: Get the last scan results from storage
+      // Get the last scan results from storage
       chrome.storage.local.get(['lastScanResults', 'lastScanStatus'], (data) => {
         sendResponse(data);
       });
       return true;
       
     case 'CLEAR_RESULTS':
-      // 🚀 NEW: Clear stored results
+      // Clear stored results
       chrome.storage.local.remove(['lastScanResults', 'lastScanStatus'], () => {
         sendResponse({ success: true });
       });
       return true;
       
     case 'HEALTH_CHECK':
-      // 🚀 NEW: Check if backend is available
+      // Check if backend is available
       checkBackendHealth(sendResponse);
       return true;
       
@@ -65,93 +62,89 @@ async function handleScanPage(data, sendResponse) {
     
     // Get all relevant settings and data from storage
     const settings = await chrome.storage.sync.get([
-      'apiEndpoint', 
       'resumeData', 
       'resumeFileName',
       'matchThreshold'
     ]);
     
-    const apiEndpoint = settings.apiEndpoint || 'https://jobmatch-production.up.railway.app/api/v1';
+    // Use fixed production API endpoint
+    const apiEndpoint = 'https://jobmatch-production.up.railway.app/api/v1';
     
+    console.log('API endpoint:', apiEndpoint);
     console.log('Scanning page:', url);
     console.log('Using API:', apiEndpoint);
     console.log('Resume data available:', !!settings.resumeData);
-    console.log('Page content summary:', {
-      jobElements: pageContent.jobElements?.length || 0,
-      jobLinks: pageContent.jobLinks?.length || 0,
-      hasJobs: !!pageContent.jobs?.length
-    });
+    console.log('Page content:', pageContent.jobElements?.length || 0, 'job elements');
     
-    // 🚀 ENHANCED: Send immediate acknowledgment to prevent timeout
+    // Send immediate acknowledgment to prevent timeout
     sendResponse({
       success: true,
       status: 'processing',
-      message: `Processing ${pageContent.jobElements?.length || 0} jobs... This may take up to 10 minutes for thorough AI analysis with Groq extraction + OpenAI matching.`,
+      message: `Processing ${pageContent.jobElements?.length || 0} jobs... This may take several minutes.`,
       progress: 0
     });
     
-    // Prepare enhanced request data with resume information
     const requestData = {
       url: url,
       user_id: 'chrome-extension-user',
       page_content: pageContent,
-      match_threshold: (settings.matchThreshold || 70) / 100, // Convert percentage to decimal
-      batch_processing: true,  // Enable batch processing for better results
-      
-      // Include structured resume data if available
+      match_threshold: (settings.matchThreshold || 70) / 100,
+      batch_processing: true,
       resume_data: settings.resumeData || null,
-      
-      // Fallback to basic resume text if structured data not available
       resume_text: settings.resumeData ? 
         generateResumeText(settings.resumeData) : null
     };
     
-    console.log('Request payload summary:', {
-      url: requestData.url,
-      jobElementsCount: requestData.page_content.jobElements?.length || 0,
-      jobLinksCount: requestData.page_content.jobLinks?.length || 0,
-      matchThreshold: requestData.match_threshold,
-      batchProcessing: requestData.batch_processing,
-      resumeDataAvailable: !!requestData.resume_data,
-      resumeTextGenerated: !!requestData.resume_text
-    });
+    console.log('Sending request for', requestData.page_content.jobElements?.length || 0, 'jobs');
     
-    // 🚀 ENHANCED: Create abort controller for timeout management
     const controller = new AbortController();
     const timeoutId = setTimeout(() => {
-      console.log('Request timeout - taking longer than expected, continuing in background');
+      console.log('Request timeout - continuing in background');
       controller.abort();
-    }, 600000); // 10 minutes timeout - for thorough job analysis
+    }, 600000);
     
-    // Send enhanced request to backend API
     try {
-      console.log('🚀 Starting enhanced API request with 10-minute timeout...');
+      console.log('Starting API request...');
+      console.log('API Endpoint:', apiEndpoint);
+      console.log('Full URL:', `${apiEndpoint}/scan/page`);
+      console.log('Request payload size:', JSON.stringify(requestData).length, 'characters');
+      console.log('Request headers:', {
+        'Content-Type': 'application/json',
+      });
+      
+      try {
+        const healthResponse = await fetch(`${apiEndpoint.replace('/api/v1', '')}/health`, {
+          method: 'GET',
+          mode: 'cors'
+        });
+        console.log('Health check status:', healthResponse.status);
+      } catch (healthError) {
+        console.error('Health check failed:', healthError);
+      }
       
       const response = await fetch(`${apiEndpoint}/scan/page`, {
         method: 'POST',
+        mode: 'cors',
         headers: {
           'Content-Type': 'application/json',
+          'Accept': 'application/json',
         },
         body: JSON.stringify(requestData),
         signal: controller.signal
       });
       
+      console.log('Response status:', response.status);
+      
       clearTimeout(timeoutId);
       
       if (!response.ok) {
+        const errorText = await response.text();
         throw new Error(`API request failed: ${response.status} ${response.statusText}`);
       }
       
       const result = await response.json();
-      console.log('✅ API response summary:', {
-        success: result.success,
-        matchesCount: result.matches?.length || 0,
-        jobsFound: result.jobs_found,
-        processingMethod: result.processing_method,
-        processingTime: result.processing_time_ms
-      });
+      console.log('API response:', result.success ? 'success' : 'failed', result.matches?.length || 0, 'matches');
       
-      // 🚀 ENHANCED: Store results in local storage for persistence
       await chrome.storage.local.set({
         lastScanResults: {
           url: url,
@@ -161,14 +154,7 @@ async function handleScanPage(data, sendResponse) {
         }
       });
       
-      // 🚀 ENHANCED: Send notification to popup if it's open
       try {
-        console.log('🔍 DEBUG: About to send SCAN_COMPLETE message to popup...');
-        console.log('🔍 DEBUG: Result summary:', {
-          success: result.success,
-          matchesCount: result.matches?.length || 0,
-          processingMethod: result.processing_method
-        });
         
         const messageData = {
           type: 'SCAN_COMPLETE',
@@ -183,65 +169,63 @@ async function handleScanPage(data, sendResponse) {
           }
         };
         
-        // Store results for popup to retrieve
         await chrome.storage.local.set({ 
           pendingResults: messageData.data,
           resultsTimestamp: Date.now()
         });
-        console.log('✅ Results stored in chrome.storage.local');
         
-        // Try to send message to popup (may fail if popup is closed)
         try {
           await chrome.runtime.sendMessage(messageData);
-          console.log('✅ Message sent to popup successfully');
         } catch (messageError) {
-          console.log('ℹ️ Popup not available for direct message, results stored for retrieval');
+          console.log('Popup not available, results stored for retrieval');
         }
         
-        // Also try sending to all tabs (fallback)
         const tabs = await chrome.tabs.query({});
         for (const tab of tabs) {
           try {
             await chrome.tabs.sendMessage(tab.id, messageData);
           } catch (tabError) {
-            // Ignore tab message errors
           }
         }
         
       } catch (error) {
-        console.error('❌ Error sending completion notification:', error);
+        console.error('Error sending completion notification:', error);
       }
       
-      console.log('✅ Scan completed successfully with enhanced processing');
+      console.log('Scan completed successfully');
       
     } catch (apiError) {
       clearTimeout(timeoutId);
       
+      console.error('API request failed:', apiError);
+      
+      if (apiError.name === 'TypeError' && apiError.message.includes('Failed to fetch')) {
+        console.error('Network error - check connection and API availability');
+      }
+      
       if (apiError.name === 'AbortError') {
-        console.log('⏰ Request timeout - API is still processing, results may be available later');
+        console.log('Request timeout - processing may still be running');
         
-        // Store timeout status
         await chrome.storage.local.set({
           lastScanStatus: {
             url: url,
             status: 'timeout',
-            message: 'Processing took longer than expected. Check backend logs for completion.',
+            message: 'Processing took longer than expected.',
             timestamp: Date.now()
           }
         });
         
-        // Try to notify popup about timeout
         try {
           await chrome.runtime.sendMessage({
             type: 'SCAN_TIMEOUT',
             data: {
               url: url,
-              message: 'Processing is taking longer than expected. The backend is likely still working. Check the terminal logs.',
+              message: 'Processing is taking longer than expected.',
               canRetry: true
             }
           });
         } catch (notifyError) {
-          console.log('Popup not open to receive timeout notification');
+          console.log('Popup not available for timeout notification');
         }
         
         return;
@@ -249,14 +233,13 @@ async function handleScanPage(data, sendResponse) {
       
       console.error('API request failed:', apiError);
       
-      // Enhanced fallback with resume awareness
-      console.log('Falling back to mock data');
+      console.log('Using fallback data');
       const mockResponse = {
         success: true,
-        matches: generateEnhancedMockData(url, settings.resumeData, pageContent),
+        matches: generateMockData(url, settings.resumeData, pageContent),
         message: settings.resumeData ? 
           'Found job matches using local resume data (API unavailable)' : 
-          'Found job matches (using mock data - no resume uploaded)',
+          'Found job matches (API unavailable)',
         jobs_found: Math.max(5, pageContent.jobElements?.length || pageContent.jobLinks?.length || 0),
         processing_time: 245,
         processing_method: 'mock',
@@ -269,7 +252,6 @@ async function handleScanPage(data, sendResponse) {
         }
       };
       
-      // Store mock results
       await chrome.storage.local.set({
         lastScanResults: {
           url: url,
@@ -279,14 +261,13 @@ async function handleScanPage(data, sendResponse) {
         }
       });
       
-      // Send mock results notification
       try {
         await chrome.runtime.sendMessage({
           type: 'SCAN_COMPLETE',
           data: mockResponse
         });
       } catch (notifyError) {
-        console.log('Popup not open to receive mock results');
+        console.log('Popup not available for results');
       }
     }
     
@@ -301,7 +282,6 @@ async function handleScanPage(data, sendResponse) {
       processing_method: 'error'
     };
     
-    // Store error results
     await chrome.storage.local.set({
       lastScanResults: {
         url: data.url,
@@ -311,44 +291,36 @@ async function handleScanPage(data, sendResponse) {
       }
     });
     
-    // Send error notification
     try {
       await chrome.runtime.sendMessage({
         type: 'SCAN_ERROR',
         data: errorResponse
       });
     } catch (notifyError) {
-      console.log('Popup not open to receive error notification');
+      console.log('Popup not available for error notification');
     }
   }
 }
 
 function generateResumeText(resumeData) {
-  /**
-   * Convert structured resume data back to text for API compatibility
-   */
   if (!resumeData) return null;
   
   let text = '';
   
-  // Add personal info
   if (resumeData.personal_info) {
     if (resumeData.personal_info.name) text += `Name: ${resumeData.personal_info.name}\n`;
     if (resumeData.personal_info.email) text += `Email: ${resumeData.personal_info.email}\n`;
     if (resumeData.personal_info.phone) text += `Phone: ${resumeData.personal_info.phone}\n`;
   }
   
-  // Add summary
   if (resumeData.summary) {
     text += `\nSummary: ${resumeData.summary}\n`;
   }
   
-  // Add skills
   if (resumeData.skills && resumeData.skills.length > 0) {
     text += `\nSkills: ${resumeData.skills.join(', ')}\n`;
   }
   
-  // Add experience
   if (resumeData.experience && resumeData.experience.length > 0) {
     text += '\nExperience:\n';
     resumeData.experience.forEach(exp => {
@@ -358,7 +330,6 @@ function generateResumeText(resumeData) {
     });
   }
   
-  // Add education
   if (resumeData.education && resumeData.education.length > 0) {
     text += '\nEducation:\n';
     resumeData.education.forEach(edu => {
@@ -369,18 +340,11 @@ function generateResumeText(resumeData) {
   return text;
 }
 
-function generateEnhancedMockData(url, resumeData, pageContent) {
-  /**
-   * Generate more realistic mock data based on resume and actual page content if available
-   */
+function generateMockData(url, resumeData, pageContent) {
   
   const baseJobs = [];
   
-  // First, try to use real job data from page content if available
   if (pageContent && pageContent.jobElements && pageContent.jobElements.length > 0) {
-    console.log('Using real job data from page content for mock scoring');
-    
-    // Use the actual jobs found but with mock scoring
     pageContent.jobElements.slice(0, 8).forEach((jobElement, index) => {
       const job = {
         id: jobElement.id || `real-${index}`,
@@ -388,17 +352,14 @@ function generateEnhancedMockData(url, resumeData, pageContent) {
         company: jobElement.company || extractCompanyFromUrl(url),
         location: jobElement.location || 'Various Locations',
         url: jobElement.url || url,
-        summary: 'Real job from page with mock scoring'
+        summary: 'Job from page'
       };
       
       baseJobs.push(job);
     });
   }
   
-  // If we have job links but no elements, use those
   else if (pageContent && pageContent.jobLinks && pageContent.jobLinks.length > 0) {
-    console.log('Using job links from page content');
-    
     pageContent.jobLinks.slice(0, 6).forEach((jobLink, index) => {
       const job = {
         id: jobLink.id || `link-${index}`,
@@ -406,16 +367,14 @@ function generateEnhancedMockData(url, resumeData, pageContent) {
         company: jobLink.company || extractCompanyFromUrl(url),
         location: jobLink.location || 'Location TBD',
         url: jobLink.url || url,
-        summary: 'Job link from page with mock scoring'
+        summary: 'Job link from page'
       };
       
       baseJobs.push(job);
     });
   }
   
-  // Fallback to completely mock jobs
   if (baseJobs.length === 0) {
-    console.log('No real job data found, using completely mock jobs');
     
     baseJobs.push(
       {
@@ -424,7 +383,7 @@ function generateEnhancedMockData(url, resumeData, pageContent) {
         company: extractCompanyFromUrl(url),
         location: 'San Francisco, CA',
         url: url,
-        summary: 'Excellent match for your technical background'
+        summary: 'Good match for your background'
       },
       {
         id: 2,
@@ -432,7 +391,7 @@ function generateEnhancedMockData(url, resumeData, pageContent) {
         company: extractCompanyFromUrl(url),
         location: 'Remote',
         url: url,
-        summary: 'Good fit for your development skills'
+        summary: 'Matches your skills'
       },
       {
         id: 3,
@@ -440,12 +399,11 @@ function generateEnhancedMockData(url, resumeData, pageContent) {
         company: extractCompanyFromUrl(url),
         location: 'New York, NY',
         url: url,
-        summary: 'Growing team with modern tech stack'
+        summary: 'Growing team opportunity'
       }
     );
   }
   
-  // Enhance with resume-specific scoring if available
   if (resumeData) {
     const userSkills = resumeData.skills || [];
     const hasReactExperience = userSkills.some(skill => 
@@ -458,12 +416,9 @@ function generateEnhancedMockData(url, resumeData, pageContent) {
       skill.toLowerCase().includes('javascript')
     );
     
-    // Apply realistic scoring based on resume
     baseJobs.forEach((job, index) => {
-      // Base score varies by position and user skills
-      let baseScore = 70 + (index * -5); // Decreasing scores
+      let baseScore = 70 + (index * -5);
       
-      // Boost for skill matches
       if (hasReactExperience && job.title.toLowerCase().includes('react')) {
         baseScore += 15;
       }
@@ -482,18 +437,17 @@ function generateEnhancedMockData(url, resumeData, pageContent) {
         !userSkills.some(userSkill => userSkill.toLowerCase().includes(skill.toLowerCase()))
       ).slice(0, 2);
       job.summary = hasReactExperience && job.title.toLowerCase().includes('react') ?
-        'Excellent match - your React experience is exactly what we need!' :
+        'Strong match for React experience' :
         hasPythonExperience && job.title.toLowerCase().includes('python') ?
-        'Great fit - your Python skills are highly valued here!' :
-        'Good potential match for your technical background';
+        'Good fit for Python skills' :
+        'Potential match for your background';
     });
   } else {
-    // Default scores when no resume
     baseJobs.forEach((job, index) => {
-      job.match_score = 75 - (index * 3); // Decreasing scores from 75
+      job.match_score = 75 - (index * 3);
       job.matching_skills = ['JavaScript', 'HTML', 'CSS'].slice(0, 2);
       job.missing_skills = ['React', 'TypeScript'];
-      job.summary = 'Upload your resume for better matching accuracy';
+      job.summary = 'Upload resume for better matching';
     });
   }
   
@@ -510,38 +464,12 @@ function extractCompanyFromUrl(url) {
   return 'Tech Corp';
 }
 
-// Handle tab updates for auto-scanning
-chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
-  if (changeInfo.status === 'complete' && tab.url) {
-    const settings = await chrome.storage.sync.get(['autoScan']);
-    
-    if (settings.autoScan && isCareerPage(tab.url)) {
-      console.log('Auto-scanning career page:', tab.url);
-      // Inject content script to scan page
-      chrome.scripting.executeScript({
-        target: { tabId: tabId },
-        files: ['content.js']
-      });
-    }
-  }
-});
+// Auto-scanning feature removed - extension only works when manually clicked
 
-function isCareerPage(url) {
-  const careerKeywords = [
-    'careers', 'jobs', 'employment', 'opportunities', 
-    'openings', 'positions', 'work-with-us', 'join-us'
-  ];
-  
-  return careerKeywords.some(keyword => 
-    url.toLowerCase().includes(keyword)
-  );
-}
-
-// 🚀 NEW: Check backend health
+// Check backend health
 async function checkBackendHealth(sendResponse) {
   try {
-    const settings = await chrome.storage.sync.get(['apiEndpoint']);
-    const apiEndpoint = settings.apiEndpoint || 'https://jobmatch-production.up.railway.app/api/v1';
+    const apiEndpoint = 'https://jobmatch-production.up.railway.app/api/v1';
     
     const response = await fetch(`${apiEndpoint.replace('/api/v1', '')}/health`, {
       method: 'GET',
@@ -565,7 +493,7 @@ async function checkBackendHealth(sendResponse) {
     sendResponse({
       success: false,
       error: error.message,
-      endpoint: settings?.apiEndpoint || 'http://localhost:8000/api/v1'
+      endpoint: 'https://jobmatch-production.up.railway.app/api/v1'
     });
   }
 } 

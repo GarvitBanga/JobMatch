@@ -1,4 +1,4 @@
-// Popup script for Bulk-Scanner Resume Matcher Chrome Extension
+// Popup script for JobMatch extension
 
 console.log('Popup script loaded');
 
@@ -9,47 +9,38 @@ document.addEventListener('DOMContentLoaded', function() {
     const status = document.getElementById('status');
     const results = document.getElementById('results');
     
-    // Initialize popup
     initializePopup();
     
-    // Event listeners
     scanButton.addEventListener('click', handleScanPage);
     settingsButton.addEventListener('click', openSettings);
     helpButton.addEventListener('click', showHelp);
     
     async function initializePopup() {
         try {
-            // Get current tab info
             const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
             
-            // Check if we're on a valid page
             if (tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://')) {
                 showStatus('Cannot scan Chrome internal pages', 'error');
                 scanButton.disabled = true;
                 return;
             }
             
-            // 🚀 ENHANCED: Check for stored results from previous scans more aggressively
             const storedResults = await chrome.storage.local.get(['lastScanResults', 'lastScanStatus']);
             
-            // Check for completed results (even if not exactly same URL)
             if (storedResults.lastScanResults && 
                 storedResults.lastScanResults.url === tab.url && 
-                Date.now() - storedResults.lastScanResults.timestamp < 600000) { // 10 minutes
+                Date.now() - storedResults.lastScanResults.timestamp < 600000) {
                 
-                console.log('Found recent scan results for this page:', storedResults.lastScanResults);
-                
-                // Display the stored results
                 const results = storedResults.lastScanResults.results;
                 if (results.success && results.matches) {
                     displayResults(results);
                     const timeAgo = Math.round((Date.now() - storedResults.lastScanResults.timestamp) / 1000);
-                    showStatus(`✅ Scan completed ${timeAgo}s ago - ${results.matches.length} matches found!`, 'success');
+                    showStatus(`Scan completed ${timeAgo}s ago - ${results.matches.length} matches found!`, 'success');
                     return;
                 }
             }
             
-            // 🚀 NEW: Also check for very recent results (within 2 minutes) even with different URLs
+            // Also check for very recent results (within 2 minutes) even with different URLs
             if (storedResults.lastScanResults && 
                 Date.now() - storedResults.lastScanResults.timestamp < 120000) { // 2 minutes
                 
@@ -59,7 +50,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     
                     displayResults(results);
                     const timeAgo = Math.round((Date.now() - storedResults.lastScanResults.timestamp) / 1000);
-                    showStatus(`✅ Recent scan completed ${timeAgo}s ago - ${results.matches.length} matches found! (Different page)`, 'success');
+                    showStatus(`Recent scan completed ${timeAgo}s ago - ${results.matches.length} matches found! (Different page)`, 'success');
                     
                     // Add a button to start fresh scan
                     const freshScanButton = document.createElement('button');
@@ -97,7 +88,7 @@ document.addEventListener('DOMContentLoaded', function() {
             
             // Update UI based on available data
             if (settings.resumeData) {
-                showStatus('Resume loaded - Enhanced matching available', 'success');
+                showStatus('Resume loaded - Better matching available', 'success');
             } else {
                 showStatus('No resume uploaded - Basic matching only', 'loading');
             }
@@ -131,7 +122,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 try {
                     await chrome.scripting.executeScript({
                         target: { tabId: tab.id },
-                        files: ['content.js']  // Use the enhanced content script with Amazon SPA support
+                        files: ['content.js']
                     });
                     
                     // Wait a moment for the script to initialize
@@ -159,83 +150,60 @@ document.addEventListener('DOMContentLoaded', function() {
             
             console.log('Page content extracted:', pageContent);
             
-            // 🚀 ENHANCED: Set up listener for background messages
             const messageListener = (message, sender, sendResponse) => {
-                console.log('🔍 DEBUG: Popup received message:', message);
-                
                 if (message.type === 'SCAN_COMPLETE') {
-                    console.log('✅ Received scan complete notification:', message.data);
                     displayResults(message.data);
                     scanButton.disabled = false;
                     chrome.runtime.onMessage.removeListener(messageListener);
                 } else if (message.type === 'SCAN_TIMEOUT') {
-                    console.log('⏰ Received scan timeout notification:', message.data);
                     showStatus('Processing is taking longer than expected. Check backend logs for progress...', 'loading');
                     
-                    // Show timeout UI with option to check results
                     setTimeout(() => {
                         showTimeoutUI(message.data);
                     }, 2000);
                     
                 } else if (message.type === 'SCAN_ERROR') {
-                    console.log('❌ Received scan error notification:', message.data);
                     showStatus(`Scan failed: ${message.data.message}`, 'error');
                     scanButton.disabled = false;
                     chrome.runtime.onMessage.removeListener(messageListener);
-                } else {
-                    console.log('🔍 DEBUG: Unknown message type:', message.type);
                 }
             };
             
             chrome.runtime.onMessage.addListener(messageListener);
             
-            // 🚀 ENHANCED: Check for pending results with better error handling
             const checkPendingResults = async (attempt = 1, maxAttempts = 30) => {
-                console.log(`🔍 DEBUG: Checking for pending results (attempt ${attempt}/${maxAttempts})`);
-                
                 try {
                     const { pendingResults, resultsTimestamp } = await chrome.storage.local.get(['pendingResults', 'resultsTimestamp']);
                     
                     if (pendingResults && resultsTimestamp) {
-                        const resultAge = Date.now() - resultsTimestamp;
-                        console.log(`✅ Found pending results (${Math.round(resultAge/1000)}s old):`, pendingResults);
-                        
-                        // Display results and stop polling
                         displayResults(pendingResults);
                         scanButton.disabled = false;
                         
-                        // Clear the stored results
                         await chrome.storage.local.remove(['pendingResults', 'resultsTimestamp']);
                         return;
                     }
                     
                     if (attempt < maxAttempts) {
-                        // Continue polling with longer intervals
-                        const delay = Math.min(1000 + (attempt * 100), 3000); // Progressive delay up to 3s
+                        const delay = Math.min(1000 + (attempt * 100), 3000);
                         setTimeout(() => checkPendingResults(attempt + 1, maxAttempts), delay);
                     } else {
-                        console.log('⏰ Polling timed out, no results found');
                         showStatus('Processing is taking longer than expected. Please try refreshing or contact support.', 'error');
                         scanButton.disabled = false;
                     }
                 } catch (error) {
-                    console.error('❌ Error checking pending results:', error);
+                    console.error('Error checking pending results:', error);
                     if (attempt < maxAttempts) {
                         setTimeout(() => checkPendingResults(attempt + 1, maxAttempts), 2000);
                     }
                 }
             };
             
-            // Clean up result checker when page is unloaded
-            window.addEventListener('beforeunload', () => {
-                clearInterval(resultChecker);
-            });
+
             
-            // 🚀 ENHANCED: Send scan request with immediate response handling
             const initialResponse = await new Promise((resolve, reject) => {
                 const timeout = setTimeout(() => {
                     reject(new Error('Extension communication timeout'));
-                }, 10000); // 10 second timeout for initial response
+                }, 10000);
                 
                 chrome.runtime.sendMessage({
                     type: 'SCAN_PAGE',
@@ -253,44 +221,34 @@ document.addEventListener('DOMContentLoaded', function() {
                 });
             });
             
-            console.log('Initial scan response:', initialResponse);
-            
-            // Handle initial acknowledgment
             if (initialResponse && initialResponse.status === 'processing') {
                 showStatus(initialResponse.message, 'loading');
                 
-                // Show progress info
                 const jobCount = pageContent.jobElements?.length || pageContent.jobLinks?.length || 0;
                 if (jobCount > 10) {
                     showProgressInfo(jobCount);
                 }
                 
-                // 🚀 NEW: Add immediate result check for fast completions
                 setTimeout(async () => {
-                    console.log('🔍 DEBUG: Quick check for immediate results...');
                     try {
                         const { pendingResults } = await chrome.storage.local.get(['pendingResults']);
                         
-                        if (pendingResults && pendingResults.timestamp > Date.now() - (5 * 60 * 1000)) { // Within last 5 minutes
-                            console.log('✅ Found immediate results!');
+                        if (pendingResults && pendingResults.timestamp > Date.now() - (5 * 60 * 1000)) {
                             displayResults(pendingResults.data);
                             scanButton.disabled = false;
                             chrome.runtime.onMessage.removeListener(messageListener);
                             
-                            // Clear the pending results
                             chrome.storage.local.remove(['pendingResults']);
                             return;
                         }
                     } catch (error) {
                         console.error('Error in immediate result check:', error);
                     }
-                }, 5000); // Check after 5 seconds
+                }, 5000);
                 
-                // Don't re-enable button yet - wait for completion message
                 return;
             }
             
-            // Handle immediate completion (for small job sets)
             if (initialResponse && initialResponse.success && initialResponse.matches) {
                 displayResults(initialResponse);
                 chrome.runtime.onMessage.removeListener(messageListener);
@@ -302,7 +260,6 @@ document.addEventListener('DOMContentLoaded', function() {
             console.error('Scan error:', error);
             showStatus(`Scan failed: ${error.message}`, 'error');
         } finally {
-            // Only re-enable if not waiting for background processing
             if (!status.textContent.includes('Processing') && !status.textContent.includes('longer than expected')) {
                 scanButton.disabled = false;
             }
@@ -315,7 +272,7 @@ document.addEventListener('DOMContentLoaded', function() {
         // Update status
         let statusText = `Found ${jobs_found} jobs`;
         if (resume_used) {
-            statusText += ' (Enhanced with your resume)';
+            statusText += ' (Using your resume)';
         }
         if (api_features?.llm_matching) {
             statusText += ' - AI Powered';
@@ -389,23 +346,23 @@ document.addEventListener('DOMContentLoaded', function() {
     
     function showHelp() {
         const helpText = `
-📖 How to use Resume Matcher:
+How to use JobMatch:
 
-1️⃣ Upload Resume (Optional):
+1. Upload Resume (Optional):
    • Click Settings → Upload resume file
-   • Get enhanced AI-powered matching
+   • Get better job matching
 
-2️⃣ Scan Job Pages:
+2. Scan Job Pages:
    • Visit any career page
    • Click "Scan Current Page"
    • View matched jobs with scores
 
-3️⃣ Best Results:
+3. Best Results:
    • Use on company career pages
    • Works with LinkedIn, Indeed, etc.
    • Higher scores = better matches
 
-💡 Tips:
+Tips:
    • Upload resume for better matching
    • Check Settings for API connection
    • Scan multiple pages for more jobs
@@ -414,23 +371,24 @@ document.addEventListener('DOMContentLoaded', function() {
         alert(helpText);
     }
     
-    // 🚀 NEW: Show progress information for large job batches
+    // Show progress information for large job batches
     function showProgressInfo(jobCount) {
         const progressDiv = document.createElement('div');
         progressDiv.id = 'progress-info';
         progressDiv.style.cssText = `
             margin-top: 10px;
             padding: 8px;
-            background-color: #f3f4f6;
-            border-radius: 4px;
+            background-color: rgba(52, 73, 94, 0.3);
+            border: 1px solid rgba(52, 152, 219, 0.2);
+            border-radius: 8px;
             font-size: 12px;
-            color: #6b7280;
+            color: #95a5a6;
         `;
         
         progressDiv.innerHTML = `
-            <div style="margin-bottom: 4px;">📊 Processing ${jobCount} jobs with enhanced AI analysis</div>
-            <div style="margin-bottom: 4px;">⏱️ This may take 1-2 minutes for full content extraction</div>
-            <div style="font-size: 11px; opacity: 0.8;">💡 Backend is fetching full job descriptions from individual pages</div>
+            <div style="margin-bottom: 4px;"><span class="loading-spinner"></span>Processing ${jobCount} jobs</div>
+            <div style="margin-bottom: 4px;">This may take 1-2 minutes for full content extraction</div>
+            <div style="font-size: 11px; opacity: 0.8;">Backend is fetching full job descriptions from individual pages</div>
         `;
         
         // Insert after status
@@ -444,24 +402,25 @@ document.addEventListener('DOMContentLoaded', function() {
         }, 30000);
     }
     
-    // 🚀 NEW: Show timeout UI with options
+    // Show timeout UI with options
     function showTimeoutUI(timeoutData) {
         const timeoutDiv = document.createElement('div');
         timeoutDiv.style.cssText = `
             margin-top: 10px;
-            padding: 10px;
-            background-color: #fff3cd;
-            border: 1px solid #ffeaa7;
-            border-radius: 4px;
+            padding: 12px;
+            background-color: rgba(241, 196, 15, 0.2);
+            border: 1px solid rgba(241, 196, 15, 0.3);
+            border-radius: 8px;
             font-size: 12px;
+            color: #f1c40f;
         `;
         
         timeoutDiv.innerHTML = `
-            <div style="font-weight: bold; margin-bottom: 6px;">⏰ Processing Timeout</div>
-            <div style="margin-bottom: 8px;">${timeoutData.message}</div>
+            <div style="font-weight: bold; margin-bottom: 6px;">Processing Timeout</div>
+            <div style="margin-bottom: 8px; color: #95a5a6;">${timeoutData.message}</div>
             <div style="display: flex; gap: 8px;">
-                <button id="check-results-btn" style="font-size: 11px; padding: 4px 8px;">Check for Results</button>
-                <button id="retry-scan-btn" style="font-size: 11px; padding: 4px 8px;">Retry Scan</button>
+                <button id="check-results-btn" style="font-size: 11px; padding: 6px 12px; background: rgba(52, 152, 219, 0.8); color: white; border: none; border-radius: 4px; cursor: pointer;">Check for Results</button>
+                <button id="retry-scan-btn" style="font-size: 11px; padding: 6px 12px; background: rgba(52, 73, 94, 0.6); color: white; border: none; border-radius: 4px; cursor: pointer;">Retry Scan</button>
             </div>
         `;
         
@@ -480,7 +439,7 @@ document.addEventListener('DOMContentLoaded', function() {
         scanButton.disabled = false;
     }
     
-    // 🚀 NEW: Check for stored results from background processing
+    // Check for stored results from background processing
     async function checkForStoredResults() {
         try {
             showStatus('Checking for completed results...', 'loading');
@@ -491,20 +450,20 @@ document.addEventListener('DOMContentLoaded', function() {
                 const results = storedResults.lastScanResults.results;
                 const timeAgo = Math.round((Date.now() - storedResults.lastScanResults.timestamp) / 1000);
                 
-                // 🚀 ENHANCED: Even show mock results if they exist, but indicate they are fallback
+                // Even show mock results if they exist, but indicate they are fallback
                 if (results.success && results.matches) {
-                    console.log('✅ Found completed results!', results);
+                    console.log('Found completed results!', results);
                     
                     // Check if these are mock results and warn user
                     if (results.processing_method === 'mock') {
-                        console.warn('⚠️ These are mock/fallback results. Backend processing may have failed.');
+                        console.warn('These are mock/fallback results. Backend processing may have failed.');
                         displayResults(results);
-                        showStatus(`⚠️ Found fallback results (${timeAgo}s ago) - Backend may have timed out. Try scanning again.`, 'loading');
+                        showStatus(`Found fallback results (${timeAgo}s ago) - Backend may have timed out. Try scanning again.`, 'loading');
                         
                         // Add button to try again
                         const retryButton = document.createElement('button');
                         retryButton.textContent = 'Scan Again with Backend';
-                        retryButton.style.cssText = 'margin-top: 8px; padding: 6px 12px; font-size: 12px;';
+                        retryButton.style.cssText = 'margin-top: 8px; padding: 6px 12px; font-size: 12px; background: rgba(52, 152, 219, 0.8); color: white; border: none; border-radius: 4px; cursor: pointer;';
                         retryButton.onclick = () => {
                             // Clear mock results and rescan
                             chrome.storage.local.remove(['lastScanResults', 'lastScanStatus']);
@@ -515,7 +474,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     } else {
                         // Real backend results
                         displayResults(results);
-                        showStatus(`✅ Found completed scan results (${timeAgo}s ago) - ${results.matches.length} matches!`, 'success');
+                        showStatus(`Found completed scan results (${timeAgo}s ago) - ${results.matches.length} matches!`, 'success');
                     }
                     
                     scanButton.disabled = false;

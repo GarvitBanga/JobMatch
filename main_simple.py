@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Enhanced FastAPI server with resume processing and LLM integration
+FastAPI server for job matching and resume processing
 """
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import uvicorn
@@ -24,11 +25,11 @@ import traceback
 from dotenv import load_dotenv
 load_dotenv()
 
-# 🚀 RATE LIMITING: Simple in-memory rate limiter
+# Simple in-memory rate limiter
 class RateLimiter:
     def __init__(self):
         self.requests = defaultdict(list)  # {user_id: [timestamp1, timestamp2, ...]}
-        self.openai_requests = defaultdict(list)  # Separate tracking for OpenAI calls
+        self.openai_requests = defaultdict(list)  # Separate tracking for API calls
     
     def is_allowed(self, user_id: str, max_requests: int = 50, window_hours: int = 24) -> bool:
         """Check if user is within general rate limit"""
@@ -50,21 +51,21 @@ class RateLimiter:
         return True
     
     def is_openai_allowed(self, user_id: str, max_openai_calls: int = 10, window_hours: int = 24) -> bool:
-        """Check if user is within OpenAI API call limit"""
+        """Check if user is within API call limit"""
         now = datetime.now()
         cutoff = now - timedelta(hours=window_hours)
         
-        # Clean old OpenAI requests
+        # Clean old API requests
         self.openai_requests[user_id] = [
             req_time for req_time in self.openai_requests[user_id] 
             if req_time > cutoff
         ]
         
-        # Check if under OpenAI limit
+        # Check if under API limit
         if len(self.openai_requests[user_id]) >= max_openai_calls:
             return False
         
-        # Record this OpenAI request
+        # Record this API request
         self.openai_requests[user_id].append(now)
         return True
     
@@ -91,19 +92,31 @@ class RateLimiter:
         }
     
     def record_openai_call(self, user_id: str) -> None:
-        """Record an OpenAI call for rate limiting purposes"""
+        """Record an API call for rate limiting purposes"""
         now = datetime.now()
         self.openai_requests[user_id].append(now)
-        logger.info(f"📊 Recorded OpenAI call for user {user_id}. Total today: {len(self.openai_requests[user_id])}")
+        logger.info(f"Recorded API call for user {user_id}. Total today: {len(self.openai_requests[user_id])}")
 
 # Global rate limiter instance
 rate_limiter = RateLimiter()
 
 # Import our resume processing services
 try:
-    from backend.app.services.resume_service import ResumeProcessor, JobMatcher
-except ImportError:
-    # Fallback if import fails
+    # Try multiple import paths for different deployment environments
+    try:
+        # First try: direct import (for production)
+        from backend.app.services.resume_service import ResumeProcessor, JobMatcher
+    except ImportError:
+        # Second try: add backend to path (for local development)
+        import sys
+        import os
+        backend_path = os.path.join(os.path.dirname(__file__), 'backend')
+        if backend_path not in sys.path:
+            sys.path.append(backend_path)
+        from app.services.resume_service import ResumeProcessor, JobMatcher
+except ImportError as e:
+    # Fallback if all imports fail
+    logger.warning(f"Failed to import resume services: {e}")
     ResumeProcessor = None
     JobMatcher = None
 
@@ -113,37 +126,22 @@ logger = logging.getLogger(__name__)
 
 # Create FastAPI app
 app = FastAPI(
-    title="Bulk-Scanner Résumé Matcher API",
+    title="JobMatch API",
     description="Backend API for Chrome extension that matches job descriptions against résumés",
     version="1.0.1",
     docs_url="/docs",
     redoc_url="/redoc",
 )
 
-# Add CORS middleware
-# Production CORS configuration for Chrome extensions
-allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "chrome-extension://*,http://localhost:3000")
-
-# Handle Chrome extension origins properly
-if "chrome-extension://*" in allowed_origins_env:
-    # Allow all origins for Chrome extensions (they use unique extension IDs)
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],  # Chrome extensions need this
-        allow_credentials=False,  # Must be False when allow_origins=["*"]
-        allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["*"],
-    )
-else:
-    # Use specific origins for other deployments
-    allowed_origins = allowed_origins_env.split(",")
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=allowed_origins,
-        allow_credentials=True,
-        allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["*"],
-    )
+# Add CORS middleware for Chrome Extensions
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins for Chrome extensions
+    allow_credentials=False,  # Must be False when allow_origins=["*"]
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+)
 
 # Pydantic models
 class ScanPageRequest(BaseModel):
@@ -153,7 +151,7 @@ class ScanPageRequest(BaseModel):
     resume_text: Optional[str] = None
     resume_data: Optional[Dict[str, Any]] = None
     match_threshold: float = 0.4
-    batch_processing: bool = True  # New field for batch processing
+    batch_processing: bool = True
 
 class BatchJobMatchRequest(BaseModel):
     jobs: List[Dict[str, Any]]
@@ -173,8 +171,8 @@ class JobMatch(BaseModel):
     missing_skills: List[str] = []
     summary: str
     confidence: str = "medium"
-    ai_analysis: Optional[str] = None  # New field for detailed AI analysis
-    rank: Optional[int] = None  # New field for ranking
+    ai_analysis: Optional[str] = None
+    rank: Optional[int] = None
 
 class ScanPageResponse(BaseModel):
     success: bool
@@ -217,13 +215,17 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    """Enhanced health check that includes LLM service status"""
+    """Health check with service status"""
     try:
         # Check basic app status
         status = {
-        "status": "healthy", 
+            "status": "healthy", 
             "timestamp": time.time(),
-            "services": {}
+            "services": {},
+            "features": {
+                "resume_processing": True,
+                "llm_matching": bool(os.getenv("OPENAI_API_KEY") or os.getenv("GROQ_API_KEY"))
+            }
         }
         
         # Check OpenAI availability
@@ -256,6 +258,42 @@ async def health_check():
         
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+@app.options("/{path:path}")
+async def options_handler(path: str):
+    """Handle OPTIONS requests for CORS preflight"""
+    return {"message": "OK"}
+
+@app.get("/privacy", response_class=HTMLResponse)
+async def privacy_policy():
+    """Serve privacy policy for Chrome Web Store"""
+    try:
+        with open("privacy_policy.html", "r") as f:
+            return HTMLResponse(content=f.read())
+    except FileNotFoundError:
+        return HTMLResponse(content="""
+        <html><body>
+        <h1>Privacy Policy - JobMatch</h1>
+        <p>JobMatch respects your privacy. We process resume data temporarily for job matching and do not store personal information permanently.</p>
+        <p>Contact: privacy@jobmatch.app</p>
+        </body></html>
+        """)
+
+@app.get("/support", response_class=HTMLResponse)
+async def support_page():
+    """Serve support page for Chrome Web Store"""
+    return HTMLResponse(content="""
+    <html><body>
+    <h1>JobMatch Support</h1>
+    <p>Need help with JobMatch? Here are some resources:</p>
+    <ul>
+        <li>Upload your resume in the extension settings</li>
+        <li>Visit company career pages and click "Scan Jobs"</li>
+        <li>View match scores and analysis in the popup</li>
+    </ul>
+    <p>Contact: support@jobmatch.app</p>
+    </body></html>
+    """)
 
 @app.get("/api/v1/usage/{user_id}")
 async def get_user_usage(user_id: str, request: Request):
@@ -357,20 +395,20 @@ async def upload_resume(
 @app.post("/api/v1/scan/page", response_model=ScanPageResponse)
 async def scan_page_with_resume(request: ScanPageRequest, http_request: Request):
     """
-    Enhanced scan endpoint that supports both individual and batch processing
+    Scan endpoint that supports both individual and batch processing
     """
     try:
         import time
         start_time = time.time()
         
-        # 🚀 RATE LIMITING: Check if user is within limits
+        # Check rate limits
         client_ip = http_request.client.host
         user_identifier = f"{request.user_id}_{client_ip}"
         
         # Check general rate limit
         if not rate_limiter.is_allowed(user_identifier, max_requests=50, window_hours=24):
             usage_stats = rate_limiter.get_usage_stats(user_identifier)
-            logger.warning(f"🚫 Rate limit exceeded for user {user_identifier}: {usage_stats}")
+            logger.warning(f"Rate limit exceeded for user {user_identifier}: {usage_stats}")
             raise HTTPException(
                 status_code=429, 
                 detail={
@@ -383,7 +421,7 @@ async def scan_page_with_resume(request: ScanPageRequest, http_request: Request)
         
         # Log rate limiting info
         usage_stats = rate_limiter.get_usage_stats(user_identifier)
-        logger.info(f"🔒 Rate limit check passed for {user_identifier}: {usage_stats}")
+        logger.info(f"Rate limit check passed for {user_identifier}: {usage_stats}")
         
         # Debug the request data
         logger.info(f"Request threshold: {request.match_threshold}")
@@ -394,13 +432,12 @@ async def scan_page_with_resume(request: ScanPageRequest, http_request: Request)
         jobs = extract_jobs_from_page_content(request.page_content, request.url)
         logger.info(f"Extracted {len(jobs)} jobs from page content")
         
-        # 🔍 PRINT ALL JOB DESCRIPTIONS FOR DEBUGGING
-        print("\n" + "="*80)
-        print(f"📋 FETCHED JOB DESCRIPTIONS FROM {request.url}")
+        # print("\n" + "="*80)
+        print(f" FETCHED JOB DESCRIPTIONS FROM {request.url}")
         print("="*80)
         
         for i, job in enumerate(jobs, 1):
-            print(f"\n🔸 JOB #{i}")
+            print(f"\n JOB #{i}")
             print(f"Title: {job.get('title', 'No Title')}")
             print(f"Company: {job.get('company', 'No Company')}")
             print(f"Location: {job.get('location', 'No Location')}")
@@ -409,7 +446,6 @@ async def scan_page_with_resume(request: ScanPageRequest, http_request: Request)
             print("Description:")
             print("-" * 60)
             description = job.get('description', 'No description available')
-            # 🚀 SHOW MUCH MORE CONTENT - Print first 2000 characters instead of 500
             if len(description) > 2000:
                 print(description[:2000])
                 print("\n[Content continues... showing first 2000 characters]")
@@ -419,16 +455,10 @@ async def scan_page_with_resume(request: ScanPageRequest, http_request: Request)
             print("-" * 60)
         
         print("="*80)
-        print(f"📊 TOTAL JOBS PROCESSED: {len(jobs)}")
+        print(f" TOTAL JOBS PROCESSED: {len(jobs)}")
         print("="*80 + "\n")
         
-        # Check if we should use batch processing
-        logger.info(f"🔍 ROUTE DEBUG: batch_processing={request.batch_processing}")
-        logger.info(f"🔍 ROUTE DEBUG: resume_data available={bool(request.resume_data)}")
-        logger.info(f"🔍 ROUTE DEBUG: jobs count={len(jobs)}")
-        logger.info(f"🔍 ROUTE DEBUG: len(jobs) > 3 = {len(jobs) > 3}")
-        
-        # 🚀 ENHANCED: More flexible batch processing conditions
+                # Check if we should use batch processing
         should_use_batch = (
             request.batch_processing and 
             len(jobs) > 3 and
@@ -439,9 +469,8 @@ async def scan_page_with_resume(request: ScanPageRequest, http_request: Request)
         )
         
         if should_use_batch:
-            logger.info(f"🚀 Using batch processing for {len(jobs)} jobs")
-            logger.info(f"🔍 ROUTE DEBUG: CALLING BATCH_JOB_MATCHING")
-            
+            logger.info(f" Using batch processing for {len(jobs)} jobs")
+                        
             # Create resume data if missing (for Amazon Jobs fallback)
             resume_data_for_batch = request.resume_data or {
                 "skills": ["JavaScript", "Python", "React", "AWS", "Node.js", "SQL", "Git", "Docker", "Kubernetes", "Java", "C++", "CSS"],
@@ -485,7 +514,6 @@ async def scan_page_with_resume(request: ScanPageRequest, http_request: Request)
             return await batch_job_matching(batch_request)
         
         # Fallback to original processing for smaller job sets or when batch is disabled
-        logger.info("🔍 ROUTE DEBUG: USING INDIVIDUAL PROCESSING (not batch)")
         logger.info("Using individual job processing")
         
         # Get job matcher
@@ -562,27 +590,22 @@ def extract_jobs_from_page_content(page_content: Dict[str, Any], url: str) -> Li
     logger.info(f"Page content received: {list(page_content.keys())}")
     logger.info(f"Page URL: {url}")
     
-    # 🚀 ENHANCED DEBUG: Print what's actually in the page content
-    logger.info(f"🔍 DEBUG: jobElements type: {type(page_content.get('jobElements'))}")
-    logger.info(f"🔍 DEBUG: jobElements value: {page_content.get('jobElements')}")
-    logger.info(f"🔍 DEBUG: jobLinks type: {type(page_content.get('jobLinks'))}")
-    logger.info(f"🔍 DEBUG: jobLinks value: {page_content.get('jobLinks')}")
-    
-    # 🎯 NEW: Detect embedded job board platforms
+    # Print what's actually in the page content
+                    
+    # Detect embedded job board platforms
     embedded_platform = detect_embedded_job_platform(url, page_content)
     if embedded_platform:
-        logger.info(f"🔧 Detected embedded job platform: {embedded_platform}")
+        logger.info(f" Detected embedded job platform: {embedded_platform}")
     
-    # Check for enhanced content script data
+    # Check for content script data
     jobs_found = []
     
-    # Try new enhanced format first - prioritize jobElements with structure
+    # Try new format first - prioritize jobElements with structure
     job_elements = page_content.get('jobElements')
     if job_elements is not None and len(job_elements) > 0:
-        logger.info(f"Found enhanced job data from content script: {len(job_elements)} elements")
+        logger.info(f"Found job data from content script: {len(job_elements)} elements")
         
         for i, element in enumerate(job_elements):
-            # Enhanced job elements have structured data
             if isinstance(element, dict):
                 job = {
                     "id": element.get('id', f"job-{i}"),
@@ -610,7 +633,7 @@ def extract_jobs_from_page_content(page_content: Dict[str, Any], url: str) -> Li
                 # Fallback for old format
                 logger.warning(f"Job element {i} is not a dict: {type(element)}")
     else:
-        logger.warning(f"🔍 DEBUG: jobElements is None or empty: {job_elements}")
+        logger.warning(f" DEBUG: jobElements is None or empty: {job_elements}")
     
     # Fallback to jobLinks if no good jobElements
     job_links = page_content.get('jobLinks')
@@ -630,7 +653,7 @@ def extract_jobs_from_page_content(page_content: Dict[str, Any], url: str) -> Li
                 jobs_found.append(job)
     else:
         if not jobs_found:
-            logger.warning(f"🔍 DEBUG: jobLinks is None or empty: {job_links}")
+            logger.warning(f" DEBUG: jobLinks is None or empty: {job_links}")
                 
     # Final fallback to legacy format
     legacy_jobs = page_content.get('jobs')
@@ -639,40 +662,39 @@ def extract_jobs_from_page_content(page_content: Dict[str, Any], url: str) -> Li
         logger.info(f"Using legacy jobs format: {len(jobs_found)} jobs")
     else:
         if not jobs_found:
-            logger.warning(f"🔍 DEBUG: legacy jobs is None or empty: {legacy_jobs}")
+            logger.warning(f" DEBUG: legacy jobs is None or empty: {legacy_jobs}")
     
-    # 🚀 If no jobs found at all, create a helpful debug response
-    if not jobs_found:
+    # if not jobs_found:
         logger.error("🚨 NO JOBS FOUND IN PAGE CONTENT - Trying dynamic content extraction...")
         
-        # 🎯 FIRST: Try to extract jobs from the Selenium-loaded content if available
+        # Try to extract jobs from the Selenium-loaded content if available
         page_text = page_content.get('text', '')
         if page_text and len(page_text) > 1000:  # Substantial content loaded by Selenium
-            logger.info(f"🔍 Found substantial page content ({len(page_text)} characters) - parsing for job links...")
+            logger.info(f" Found substantial page content ({len(page_text)} characters) - parsing for job links...")
             
-            # 🔍 DEBUG: Log a sample of the page content to see what we're working with
-            logger.info(f"🔍 DYNAMIC CONTENT SAMPLE (first 500 chars): {page_text[:500]}")
-            logger.info(f"🔍 CHECKING FOR ASHBY PATTERNS: ashby_jid in content: {'ashby_jid' in page_text.lower()}")
-            logger.info(f"🔍 CHECKING FOR JOB PATTERNS: 'job' in content: {'job' in page_text.lower()}")
+            # Log a sample of the page content to see what we're working with
+            logger.info(f" DYNAMIC CONTENT SAMPLE (first 500 chars): {page_text[:500]}")
+            logger.info(f" CHECKING FOR ASHBY PATTERNS: ashby_jid in content: {'ashby_jid' in page_text.lower()}")
+            logger.info(f" CHECKING FOR JOB PATTERNS: 'job' in content: {'job' in page_text.lower()}")
             
             try:
                 from bs4 import BeautifulSoup
                 soup = BeautifulSoup(page_text, 'html.parser')
                 
-                # 🔍 DEBUG: Check what links we can find
+                # Check what links we can find
                 all_links = soup.find_all('a', href=True)
-                logger.info(f"🔍 TOTAL LINKS FOUND IN DYNAMIC CONTENT: {len(all_links)}")
+                logger.info(f" TOTAL LINKS FOUND IN DYNAMIC CONTENT: {len(all_links)}")
                 
                 # Show first few links for debugging
                 for i, link in enumerate(all_links[:5]):
                     href = link.get('href', '')
                     title = link.get_text(strip=True)
-                    logger.info(f"🔍 Link {i+1}: href='{href}' title='{title}'")
+                    logger.info(f" Link {i+1}: href='{href}' title='{title}'")
                 
-                # Use our enhanced generic selectors on the Selenium-loaded content
-                logger.info("🔄 Applying enhanced job selectors to dynamic content...")
+                # Use our generic selectors on the Selenium-loaded content
+                logger.info("🔄 Applying job selectors to dynamic content...")
                 
-                # Enhanced generic job link selectors - same as in extract_generic_jobs_fallback
+                # Generic job link selectors - same as in extract_generic_jobs_fallback
                 job_selectors = [
                     # Traditional job URL patterns
                     'a[href*="job"]', 'a[href*="position"]', 'a[href*="career"]',
@@ -695,13 +717,13 @@ def extract_jobs_from_page_content(page_content: Dict[str, Any], url: str) -> Li
                 for selector in job_selectors:
                     job_links = soup.select(selector)
                     if job_links:
-                        logger.info(f"✅ Found {len(job_links)} job links in dynamic content using selector: {selector}")
+                        logger.info(f" Found {len(job_links)} job links in dynamic content using selector: {selector}")
                         
                         for i, link in enumerate(job_links[:10]):  # Limit to first 10
                             href = link.get('href', '')
                             title = link.get_text(strip=True)
                             
-                            # Enhanced URL validation
+                            # URL validation
                             if not href or not title or len(title) < 3:
                                 continue
                             
@@ -743,30 +765,30 @@ def extract_jobs_from_page_content(page_content: Dict[str, Any], url: str) -> Li
                             break  # Stop at first successful selector
                 
                 if dynamic_jobs:
-                    logger.info(f"🎉 Successfully extracted {len(dynamic_jobs)} jobs from dynamic content!")
+                    logger.info(f" Successfully extracted {len(dynamic_jobs)} jobs from dynamic content!")
                     jobs_found = dynamic_jobs
                 else:
-                    logger.warning("⚠️ No jobs found in dynamic content, falling back to direct scraping...")
+                    logger.warning(" No jobs found in dynamic content, falling back to direct scraping...")
                     
             except Exception as e:
-                logger.error(f"❌ Error parsing dynamic content: {str(e)}")
+                logger.error(f" Error parsing dynamic content: {str(e)}")
         
-        # 🎯 FALLBACK: If dynamic content extraction failed, try direct scraping
+        # If dynamic content extraction failed, try direct scraping
         if not jobs_found:
-            logger.warning("⚠️ Dynamic content extraction failed - trying direct page scraping...")
+            logger.warning(" Dynamic content extraction failed - trying direct page scraping...")
             
-            # 🎯 ENHANCED: Platform-specific extraction strategies
+            # Platform-specific extraction strategies
             if embedded_platform == 'ashby':
-                logger.info("🔧 Using Ashby-specific extraction strategy")
+                logger.info(" Using Ashby-specific extraction strategy")
                 jobs_found = extract_ashby_jobs_fallback(url)
             elif embedded_platform == 'greenhouse':
-                logger.info("🔧 Using Greenhouse-specific extraction strategy")
+                logger.info(" Using Greenhouse-specific extraction strategy")
                 jobs_found = extract_greenhouse_jobs_fallback(url)
             elif embedded_platform == 'lever':
-                logger.info("🔧 Using Lever-specific extraction strategy")
+                logger.info(" Using Lever-specific extraction strategy")
                 jobs_found = extract_lever_jobs_fallback(url)
             elif embedded_platform == 'workday':
-                logger.info("🔧 Using Workday-specific extraction strategy")
+                logger.info(" Using Workday-specific extraction strategy")
                 jobs_found = extract_workday_jobs_fallback(url)
             else:
                 # Generic fallback
@@ -796,15 +818,15 @@ def extract_jobs_from_page_content(page_content: Dict[str, Any], url: str) -> Li
             }
         jobs_found = [debug_job]
     
-    # 🚀 SPECIAL CASE: Amazon Jobs requires Selenium for the search page itself
+    # Amazon Jobs requires Selenium for the search page itself
     if 'amazon.jobs' in url.lower() and jobs_found and len(jobs_found) == 1 and jobs_found[0].get('id') == 'debug-1':
-        logger.info("🎯 Amazon Jobs detected with failed static extraction - trying Selenium for search page")
+        logger.info(" Amazon Jobs detected with failed static extraction - trying Selenium for search page")
         
         try:
             # Use Selenium to extract jobs directly from the Amazon search page
             from selenium_job_extractor import fetch_job_selenium_implementation
             
-            logger.info("🚀 Using Selenium for Amazon Jobs search page extraction")
+            logger.info(" Using Selenium for Amazon Jobs search page extraction")
             
             # Create a basic job object for the search page
             search_page_job = {
@@ -820,7 +842,7 @@ def extract_jobs_from_page_content(page_content: Dict[str, Any], url: str) -> Li
             selenium_result = fetch_job_selenium_implementation(url, search_page_job)
             
             if selenium_result and selenium_result.get('description') and len(selenium_result.get('description', '')) > 500:
-                logger.info(f"✅ Selenium extraction successful for Amazon search: {len(selenium_result.get('description', ''))} characters")
+                logger.info(f" Selenium extraction successful for Amazon search: {len(selenium_result.get('description', ''))} characters")
                 
                 # If Selenium found job links, convert them to job objects
                 if selenium_result.get('job_links_found'):
@@ -839,7 +861,7 @@ def extract_jobs_from_page_content(page_content: Dict[str, Any], url: str) -> Li
                         selenium_jobs.append(selenium_job)
                     
                     if selenium_jobs:
-                        logger.info(f"🎉 Selenium found {len(selenium_jobs)} Amazon jobs from search page!")
+                        logger.info(f" Selenium found {len(selenium_jobs)} Amazon jobs from search page!")
                         jobs_found = selenium_jobs
                     else:
                         # Use the search page result as a single job
@@ -848,36 +870,36 @@ def extract_jobs_from_page_content(page_content: Dict[str, Any], url: str) -> Li
                     # Use the search page result as a single job
                     jobs_found = [selenium_result]
             else:
-                logger.warning("⚠️ Selenium extraction for Amazon search page returned minimal content")
+                logger.warning(" Selenium extraction for Amazon search page returned minimal content")
                 
         except ImportError:
             logger.warning("📦 Selenium not available for Amazon Jobs extraction")
         except Exception as e:
-            logger.error(f"❌ Selenium extraction failed for Amazon search page: {str(e)}")
+            logger.error(f" Selenium extraction failed for Amazon search page: {str(e)}")
     
-    # 🚀 NEW: FETCH FULL JOB DESCRIPTIONS FROM INDIVIDUAL JOB PAGES
+    # Fetch full job descriptions
     if jobs_found:
         logger.info(f"📡 Fetching full job descriptions from {len(jobs_found)} individual job pages...")
         
-        enhanced_jobs = []
+        processed_jobs = []
         for i, job in enumerate(jobs_found):
             job_url = job.get('url', '')
             
             # Skip if no valid URL or same as base URL
             if not job_url or job_url == url:
                 logger.warning(f"Job {i+1}: No valid URL, using summary description")
-                enhanced_jobs.append(job)
+                processed_jobs.append(job)
                 continue
             
             try:
                 logger.info(f"🔗 Fetching job {i+1}/{len(jobs_found)}: {job_url}")
                 
-                # 🚀 ENHANCED: Try multiple fetching strategies for different site types
+                # Try multiple fetching strategies
                 full_job_data = fetch_job_with_fallback_strategies(job_url, job)
                 
                 if full_job_data and full_job_data.get('description') and len(full_job_data.get('description', '')) > 100:
                     # Successfully extracted meaningful content
-                    enhanced_job = {
+                    processed_job = {
                         **job,
                         "description": full_job_data.get('description', job.get('description', '')),
                         "requirements": full_job_data.get('requirements', []),
@@ -888,34 +910,34 @@ def extract_jobs_from_page_content(page_content: Dict[str, Any], url: str) -> Li
                         "posted_date": full_job_data.get('posted_date', ''),
                         "full_details_fetched": True,
                         "original_summary": job.get('description', ''),
-                        "extraction_method": full_job_data.get('extraction_method', 'enhanced_fetch'),
+                        "extraction_method": full_job_data.get('extraction_method', 'standard_fetch'),
                         "fetch_success": True
                     }
                     
-                    enhanced_jobs.append(enhanced_job)
-                    logger.info(f"✅ Job {i+1}: Successfully fetched {len(full_job_data.get('description', ''))} characters using {full_job_data.get('extraction_method', 'unknown')} method")
+                    processed_jobs.append(processed_job)
+                    logger.info(f" Job {i+1}: Successfully fetched {len(full_job_data.get('description', ''))} characters using {full_job_data.get('extraction_method', 'unknown')} method")
                 else:
                     # Extraction failed, keep original data
-                    logger.warning(f"⚠️ Job {i+1}: Extraction returned minimal content, keeping original summary")
+                    logger.warning(f" Job {i+1}: Extraction returned minimal content, keeping original summary")
                     job['full_details_fetched'] = False
                     job['fetch_success'] = False
                     job['extraction_method'] = 'failed_extraction'
-                    enhanced_jobs.append(job)
+                    processed_jobs.append(job)
                 
                 # Add delay to be respectful to servers
                 import time
                 time.sleep(0.5)  # 500ms delay between requests
                 
             except Exception as e:
-                logger.error(f"❌ Failed to fetch job {i+1} ({job_url}): {str(e)}")
+                logger.error(f" Failed to fetch job {i+1} ({job_url}): {str(e)}")
                 # Keep original job data if fetch fails
                 job['full_details_fetched'] = False
                 job['fetch_error'] = str(e)
                 job['fetch_success'] = False
-                enhanced_jobs.append(job)
+                processed_jobs.append(job)
         
-        logger.info(f"✅ Enhanced {len(enhanced_jobs)} jobs with full descriptions")
-        return enhanced_jobs
+        logger.info(f" standard {len(processed_jobs)} jobs with full descriptions")
+        return processed_jobs
     
     # Fallback if no jobs found at all
     return jobs_found
@@ -926,11 +948,11 @@ def fetch_job_with_fallback_strategies(job_url: str, basic_job: Dict[str, Any]) 
     Handles both static HTML sites and JavaScript-heavy SPAs
     """
     
-    # 🚀 GENERALIZED APPROACH: Try strategies in order for all sites
+    # Try strategies in order for all sites
     logger.info(f"🔄 Using generalized extraction strategy for: {job_url}")
     
     strategies = [
-        ("enhanced_static", fetch_job_static_enhanced),     # Try static first (fastest)
+        ("static", fetch_job_static),     # Try static first (fastest)
         ("selenium_fallback", fetch_job_selenium_fallback), # Try Selenium for dynamic content
         ("api_discovery", fetch_job_api_discovery)          # Try API discovery as last resort
     ]
@@ -951,46 +973,46 @@ def fetch_job_with_fallback_strategies(job_url: str, basic_job: Dict[str, Any]) 
                     "Detected JavaScript SPA" in description
                 )
                 
-                # 🚀 GENERALIZED THRESHOLD: Accept results based on content quality
+                # Accept results based on content quality
                 if strategy_name == "selenium_fallback" and description_length > 200:
                     # Accept Selenium results with lower threshold (dynamic content)
                     result['extraction_method'] = strategy_name
-                    logger.info(f"✅ {strategy_name} succeeded: {description_length} characters")
+                    logger.info(f" {strategy_name} succeeded: {description_length} characters")
                     return result
                 elif strategy_name != "selenium_fallback" and description_length > 500:
                     # Higher threshold for static extraction
                     result['extraction_method'] = strategy_name
-                    logger.info(f"✅ {strategy_name} succeeded: {description_length} characters")
+                    logger.info(f" {strategy_name} succeeded: {description_length} characters")
                     return result
                 elif is_spa_warning and strategy_name != "selenium_fallback":
                     # If SPA detected, continue to Selenium
-                    logger.info(f"⚠️ {strategy_name} detected SPA, continuing to Selenium")
+                    logger.info(f" {strategy_name} detected SPA, continuing to Selenium")
                     continue
                 else:
-                    logger.info(f"⚠️ {strategy_name} returned insufficient content ({description_length} chars), trying next strategy")
+                    logger.info(f" {strategy_name} returned insufficient content ({description_length} chars), trying next strategy")
                     continue
             else:
-                logger.info(f"⚠️ {strategy_name} returned no description, trying next strategy")
+                logger.info(f" {strategy_name} returned no description, trying next strategy")
         
         except Exception as e:
-            logger.warning(f"❌ {strategy_name} failed: {str(e)}")
+            logger.warning(f" {strategy_name} failed: {str(e)}")
             continue
     
     # All strategies failed, return basic job data
-    logger.error(f"❌ All extraction strategies failed for {job_url}")
+    logger.error(f" All extraction strategies failed for {job_url}")
     return {
         **basic_job,
         "description": f"Unable to extract job details from {job_url}. This may be a JavaScript-heavy site.",
         "extraction_method": "all_strategies_failed"
     }
 
-def fetch_job_static_enhanced(job_url: str, basic_job: Dict[str, Any]) -> Dict[str, Any]:
-    """Enhanced static HTML fetching with better session handling and headers"""
+def fetch_job_static(job_url: str, basic_job: Dict[str, Any]) -> Dict[str, Any]:
+    """Static HTML fetching with better session handling and headers"""
     
     import requests
     from bs4 import BeautifulSoup
     
-    # Create session with enhanced headers
+    # Create session with headers
     session = requests.Session()
     
     # Mimic a real browser more closely
@@ -1035,39 +1057,39 @@ def fetch_job_static_enhanced(job_url: str, basic_job: Dict[str, Any]) -> Dict[s
         "job_type": "",
         "posted_date": "",
         "application_deadline": "",
-        "extraction_method": "enhanced_static"
+        "extraction_method": "static"
     }
     
     # Detect site type and use appropriate extraction
     job_url_lower = job_url.lower()
     
     if 'myworkdayjobs.com' in job_url_lower or 'workday' in job_url_lower:
-        logger.info("🔧 Detected Workday site - using enhanced Workday extraction")
-        job_data = extract_workday_job_enhanced(soup, job_data)
+        logger.info(" Detected Workday site - using Workday extraction")
+        job_data = extract_workday_job(soup, job_data)
         
     elif 'greenhouse.io' in job_url_lower or 'grnh.se' in job_url_lower:
-        logger.info("🔧 Detected Greenhouse site - using Greenhouse extraction")
+        logger.info(" Detected Greenhouse site - using Greenhouse extraction")
         job_data = extract_greenhouse_job(soup, job_data)
         
     elif 'jobs.lever.co' in job_url_lower:
-        logger.info("🔧 Detected Lever site - using Lever extraction")
+        logger.info(" Detected Lever site - using Lever extraction")
         job_data = extract_lever_job(soup, job_data)
         
     elif 'bamboohr.com' in job_url_lower:
-        logger.info("🔧 Detected BambooHR site - using BambooHR extraction")
+        logger.info(" Detected BambooHR site - using BambooHR extraction")
         job_data = extract_bamboohr_job(soup, job_data)
         
     elif 'amazon.jobs' in job_url_lower:
-        logger.info("🔧 Detected Amazon Jobs - using Amazon extraction")
+        logger.info(" Detected Amazon Jobs - using Amazon extraction")
         job_data = extract_amazon_job(soup, job_data)
         
     elif 'careers.db.com' in job_url_lower or 'deutsche-bank' in job_url_lower:
-        logger.info("🔧 Detected Deutsche Bank careers site - using Deutsche Bank extraction")
+        logger.info(" Detected Deutsche Bank careers site - using Deutsche Bank extraction")
         job_data = extract_deutsche_bank_job(soup, job_data, job_url)
         
         # Check if we got a short description (likely dynamic content not loaded)
         if len(job_data.get('description', '')) < 100:
-            logger.warning(f"⚠️ Short description detected ({len(job_data.get('description', ''))} chars), retrying with Selenium")
+            logger.warning(f" Short description detected ({len(job_data.get('description', ''))} chars), retrying with Selenium")
             # Use Selenium for Deutsche Bank jobs
             from selenium_job_extractor import SeleniumJobExtractor
             extractor = SeleniumJobExtractor(headless=True)
@@ -1083,15 +1105,15 @@ def fetch_job_static_enhanced(job_url: str, basic_job: Dict[str, Any]) -> Dict[s
                 
                 # Verify we got a substantial description
                 if len(job_data.get('description', '')) < 100:
-                    logger.warning("⚠️ Selenium extraction still got short description, retrying with longer wait")
+                    logger.warning(" Selenium extraction still got short description, retrying with longer wait")
                     # Retry with longer wait
                     extractor.driver.set_page_load_timeout(30)
                     job_data = extractor.extract_deutsche_bank_job_selenium(job_url, basic_job)
             finally:
                 extractor.close()
     else:
-        logger.info("🔧 Using generic extraction for unknown site")
-        job_data = extract_generic_job_enhanced(soup, job_data)
+        logger.info(" Using generic extraction for unknown site")
+        job_data = extract_generic_job(soup, job_data)
     
     # Post-process and clean up the job data
     job_data = clean_job_data(job_data)
@@ -1135,7 +1157,7 @@ def fetch_job_api_discovery(job_url: str, basic_job: Dict[str, Any]) -> Dict[str
                             # Extract job details from API response
                             job_data = extract_workday_api_data(data, basic_job, job_url)
                             if job_data.get('description') and len(job_data.get('description', '')) > 100:
-                                logger.info(f"✅ Found Workday API data: {len(job_data.get('description', ''))} characters")
+                                logger.info(f" Found Workday API data: {len(job_data.get('description', ''))} characters")
                                 return job_data
                     except:
                         continue
@@ -1154,30 +1176,30 @@ def fetch_job_selenium_fallback(job_url: str, basic_job: Dict[str, Any]) -> Dict
         # Try to import and use the Selenium extractor
         from selenium_job_extractor import fetch_job_selenium_implementation
         
-        logger.info("🚀 Using Selenium WebDriver for JavaScript content")
+        logger.info(" Using Selenium WebDriver for JavaScript content")
         result = fetch_job_selenium_implementation(job_url, basic_job)
         
         if result and result.get('description') and len(result.get('description', '')) > 100:
-            logger.info(f"✅ Selenium extraction successful: {len(result.get('description', ''))} characters")
+            logger.info(f" Selenium extraction successful: {len(result.get('description', ''))} characters")
             return result
         else:
-            logger.warning("⚠️ Selenium extraction returned minimal content")
+            logger.warning(" Selenium extraction returned minimal content")
             return {}
     
     except ImportError:
         logger.info("📦 Selenium not installed - skipping WebDriver extraction")
-        logger.info("💡 Install with: pip install selenium")
+        logger.info(" Install with: pip install selenium")
         return {}
     
     except Exception as e:
-        logger.error(f"❌ Selenium extraction failed: {str(e)}")
+        logger.error(f" Selenium extraction failed: {str(e)}")
         return {}
 
-def extract_workday_job_enhanced(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, Any]:
-    """Enhanced Workday extraction that handles both static and dynamic content indicators"""
+def extract_workday_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, Any]:
+    """Workday extraction that handles both static and dynamic content indicators"""
     
     try:
-        logger.info(f"🔍 Enhanced Workday extraction for: {job.get('url', 'Unknown URL')}")
+        logger.info(f" Workday extraction for: {job.get('url', 'Unknown URL')}")
         
         # Check if this is a SPA (Single Page Application)
         page_text = soup.get_text()
@@ -1188,7 +1210,7 @@ def extract_workday_job_enhanced(soup: BeautifulSoup, job: Dict[str, Any]) -> Di
         )
         
         if is_spa:
-            logger.warning("⚠️ Detected JavaScript SPA - static extraction will have limited success")
+            logger.warning(" Detected JavaScript SPA - static extraction will have limited success")
             job["description"] = f"This Workday job posting uses JavaScript rendering. Limited content available through static extraction. Job URL: {job.get('url', '')}"
             job["extraction_method"] = "spa_limited"
             return job
@@ -1197,16 +1219,16 @@ def extract_workday_job_enhanced(soup: BeautifulSoup, job: Dict[str, Any]) -> Di
         return extract_workday_job(soup, job)
         
     except Exception as e:
-        logger.error(f"Enhanced Workday extraction failed: {str(e)}")
-        job["description"] = f"Enhanced Workday extraction error: {str(e)}"
+        logger.error(f"Workday extraction failed: {str(e)}")
+        job["description"] = f"Workday extraction error: {str(e)}"
         return job
 
-def extract_generic_job_enhanced(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, Any]:
-    """Enhanced generic extraction with better content detection"""
+def extract_generic_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, Any]:
+    """Generic extraction with better content detection"""
     
     try:
-        # Use the existing universal extraction but with enhanced error handling
-        job = extract_universal_job_content(soup, job, "enhanced_generic")
+        # Use the existing universal extraction but with error handling
+        job = extract_universal_job_content(soup, job, "generic")
         
         # If extraction failed, try alternative approaches
         if not job.get("description") or len(job.get("description", "")) < 100:
@@ -1216,7 +1238,7 @@ def extract_generic_job_enhanced(soup: BeautifulSoup, job: Dict[str, Any]) -> Di
             meta_desc = soup.find('meta', {'name': 'description'})
             if meta_desc and meta_desc.get('content'):
                 job["description"] = f"Job Summary: {meta_desc.get('content')}"
-                logger.info("✅ Extracted content from meta description")
+                logger.info(" Extracted content from meta description")
             
             # Try structured data (JSON-LD)
             json_ld_scripts = soup.find_all('script', {'type': 'application/ld+json'})
@@ -1228,7 +1250,7 @@ def extract_generic_job_enhanced(soup: BeautifulSoup, job: Dict[str, Any]) -> Di
                         description = data.get('description', '')
                         if description and len(description) > 100:
                             job["description"] = f"Job Posting: {description}"
-                            logger.info("✅ Extracted content from JSON-LD structured data")
+                            logger.info(" Extracted content from JSON-LD structured data")
                             break
                 except:
                     continue
@@ -1236,8 +1258,8 @@ def extract_generic_job_enhanced(soup: BeautifulSoup, job: Dict[str, Any]) -> Di
         return job
         
     except Exception as e:
-        logger.error(f"Enhanced generic extraction failed: {str(e)}")
-        job["description"] = f"Enhanced generic extraction error: {str(e)}"
+        logger.error(f"Generic extraction failed: {str(e)}")
+        job["description"] = f"Generic extraction error: {str(e)}"
         return job
 
 def extract_workday_api_data(api_data: Dict, basic_job: Dict[str, Any], job_url: str) -> Dict[str, Any]:
@@ -1351,14 +1373,14 @@ async def fetch_job_details(
     request: Dict[str, Any]
 ):
     """
-    Enhanced job fetching for cross-origin sites (Workday, Greenhouse, Lever, etc.)
+    Job fetching for cross-origin sites (Workday, Greenhouse, Lever, etc.)
     """
     try:
         # Extract parameters from request
         job_url = request.get('job_url')
         user_id = request.get('user_id', 'default')
         include_full_content = request.get('include_full_content', True)
-        extraction_method = request.get('extraction_method', 'enhanced')
+        extraction_method = request.get('extraction_method', 'standard')
         
         if not job_url:
             return {
@@ -1369,7 +1391,7 @@ async def fetch_job_details(
         
         logger.info(f"Fetching job details for: {job_url}")
         
-        # Enhanced headers to bypass most bot detection
+        # headers to bypass most bot detection
         headers = {
             'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
@@ -1451,7 +1473,7 @@ async def fetch_job_details(
             "success": True,
             "job": job,
             "user_id": user_id,
-            "processing_method": "enhanced_server_fetch",
+            "processing_method": "standard_server_fetch",
             "extraction_site_type": detect_site_type(job_url),
             "content_length": len(job.get('description', '')),
             "processing_time_ms": 0  # Could add timing if needed
@@ -1481,7 +1503,7 @@ def extract_universal_job_content(soup: BeautifulSoup, job: Dict[str, Any], site
     """
     
     try:
-        # 🚀 UNIVERSAL APPROACH: Extract everything from the main content area
+        # Extract everything from the main content area
         
         # Remove unwanted elements first
         for unwanted in soup.select('script, style, nav, footer, header, .navigation, .menu, .recommended-jobs, .similar-jobs, .related-jobs'):
@@ -1493,8 +1515,8 @@ def extract_universal_job_content(soup: BeautifulSoup, job: Dict[str, Any], site
         # Split into lines and clean up
         lines = [line.strip() for line in full_text.split('\n') if line.strip()]
         
-        # 🔍 ENHANCED: Print first 20 lines for debugging
-        logger.info(f"🔍 First 20 lines from {site_type} site:")
+        # Print first 20 lines for debugging
+        logger.info(f" First 20 lines from {site_type} site:")
         for i, line in enumerate(lines[:20]):
             logger.info(f"Line {i+1}: {line}")
         
@@ -1503,7 +1525,7 @@ def extract_universal_job_content(soup: BeautifulSoup, job: Dict[str, Any], site
         current_section = ""
         current_content = []
         
-        # 🚀 EXPANDED: More section headers across all job sites
+        # More section headers across all job sites
         section_headers = {
             # Job Description variations
             "DESCRIPTION": "Job Description",
@@ -1572,7 +1594,7 @@ def extract_universal_job_content(soup: BeautifulSoup, job: Dict[str, Any], site
             "JOB TYPE": "Job Type"
         }
         
-        # 🔍 ENHANCED: More comprehensive stop words
+        # Stop words
         stop_sections = {
             "RECOMMENDED JOBS", "SIMILAR JOBS", "RELATED JOBS", "OTHER OPENINGS",
             "SHARE THIS JOB", "APPLY NOW", "APPLICATION PROCESS", "HOW TO APPLY",
@@ -1583,7 +1605,7 @@ def extract_universal_job_content(soup: BeautifulSoup, job: Dict[str, Any], site
             "POSTING START DATE", "POSTING END DATE", "RECEIVE JOB ALERTS"
         }
         
-        # 🎯 ENHANCED: Look for content before processing sections
+        # Look for content before processing
         content_found = False
         main_content_lines = []
         
@@ -1610,7 +1632,7 @@ def extract_universal_job_content(soup: BeautifulSoup, job: Dict[str, Any], site
         
         # If we found substantial content, use it
         if content_found and main_content_lines:
-            logger.info(f"✅ Found {len(main_content_lines)} substantial content lines")
+            logger.info(f" Found {len(main_content_lines)} substantial content lines")
             description_parts.append(f"Job Information:\n{chr(10).join(main_content_lines)}")
         
         # Second pass: Normal section parsing
@@ -1653,14 +1675,14 @@ def extract_universal_job_content(soup: BeautifulSoup, job: Dict[str, Any], site
         if current_section and current_content:
             description_parts.append(f"{current_section}:\n{chr(10).join(current_content)}")
         
-        # 🔍 ENHANCED FALLBACK: If no structured sections found, use smart content extraction
+        # If no structured sections found, use smart content extraction
         if not description_parts:
             logger.warning(f"No structured sections found for {site_type} site, using smart fallback extraction")
             
             # Join all lines into text for pattern matching
             text_content = " ".join(lines)
             
-            # 🎯 ENHANCED: More aggressive pattern matching
+            # Pattern matching
             patterns_to_extract = [
                 ("DESCRIPTION", "Job Description"),
                 ("RESPONSIBILITIES", "Responsibilities"),
@@ -1689,9 +1711,9 @@ def extract_universal_job_content(soup: BeautifulSoup, job: Dict[str, Any], site
                         if len(content) > 100:  # Only substantial content
                             description_parts.append(f"{section_name}:\n{content}")
         
-        # 🔧 ENHANCED: More aggressive element-based extraction
+        # Element-based extraction
         if not description_parts:
-            logger.warning(f"Pattern matching failed for {site_type} site, using enhanced element-based extraction")
+            logger.warning(f"Pattern matching failed for {site_type} site, using standard element-based extraction")
             
             # Look for content in common job posting containers
             content_selectors = [
@@ -1727,9 +1749,9 @@ def extract_universal_job_content(soup: BeautifulSoup, job: Dict[str, Any], site
             if extracted_content:
                 description_parts.append(f"Job Information:\n{extracted_content[0]}")
         
-        # 🎯 ENHANCED: More intelligent final fallback
+        # Final fallback
         if not description_parts:
-            logger.warning(f"All extraction methods failed for {site_type} site, using enhanced text content fallback")
+            logger.warning(f"All extraction methods failed for {site_type} site, using standard text content fallback")
             
             # Filter out navigation, footer, and other non-content text
             substantial_content = []
@@ -1771,12 +1793,12 @@ def extract_universal_job_content(soup: BeautifulSoup, job: Dict[str, Any], site
     return job
 
 def extract_workday_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract job details from Workday sites with enhanced selectors and content extraction"""
+    """Extract job details from Workday sites with standard selectors and content extraction"""
     
     try:
-        logger.info(f"🔍 Extracting Workday job from: {job.get('url', 'Unknown URL')}")
+        logger.info(f" Extracting Workday job from: {job.get('url', 'Unknown URL')}")
         
-        # Enhanced title extraction for Workday
+        # standard title extraction for Workday
         title_selectors = [
             '[data-automation-id="jobPostingHeader"]',
             'h1[data-automation-id]',
@@ -1790,10 +1812,10 @@ def extract_workday_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, A
             title_el = soup.select_one(selector)
             if title_el and title_el.get_text().strip():
                 job["title"] = title_el.get_text().strip()
-                logger.info(f"✅ Found title: {job['title']}")
+                logger.info(f" Found title: {job['title']}")
                 break
         
-        # Enhanced company extraction for Workday
+        # standard company extraction for Workday
         company_selectors = [
             '[data-automation-id="breadcrumb"] span',
             '.css-1c6k6o1',
@@ -1808,10 +1830,10 @@ def extract_workday_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, A
                 company_text = company_el.get_text().strip()
                 if 'careers' not in company_text.lower() and 'jobs' not in company_text.lower():
                     job["company"] = company_text.split('-')[0].split('|')[0].strip()
-                    logger.info(f"✅ Found company: {job['company']}")
+                    logger.info(f" Found company: {job['company']}")
                     break
         
-        # Enhanced location extraction for Workday
+        # standard location extraction for Workday
         location_selectors = [
             '[data-automation-id="locations"]',
             '[data-automation-id="jobPostingHeaderSubtitle"]',
@@ -1824,10 +1846,10 @@ def extract_workday_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, A
             location_el = soup.select_one(selector)
             if location_el and location_el.get_text().strip():
                 job["location"] = location_el.get_text().strip()
-                logger.info(f"✅ Found location: {job['location']}")
+                logger.info(f" Found location: {job['location']}")
                 break
         
-        # 🚀 ENHANCED: Workday-specific job description extraction
+        # Workday-specific job description extraction
         description_parts = []
         
         # Primary Workday content selectors (ordered by priority)
@@ -1843,7 +1865,7 @@ def extract_workday_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, A
             '.rich-text-content'
         ]
         
-        logger.info("🔍 Searching for job description with Workday selectors...")
+        logger.info(" Searching for job description with Workday selectors...")
         
         for selector in workday_content_selectors:
             elements = soup.select(selector)
@@ -1853,15 +1875,15 @@ def extract_workday_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, A
                 content = element.get_text(separator='\n', strip=True)
                 if content and len(content) > 100:  # Substantial content
                     description_parts.append(f"Job Description:\n{content}")
-                    logger.info(f"✅ Found substantial content: {len(content)} characters using selector '{selector}'")
+                    logger.info(f" Found substantial content: {len(content)} characters using selector '{selector}'")
                     break
             
             if description_parts:  # Stop at first substantial match
                 break
         
-        # 🔧 ENHANCED: Additional Workday content patterns
+        # Additional Workday content patterns
         if not description_parts:
-            logger.info("🔍 Trying alternative Workday content extraction patterns...")
+            logger.info(" Trying alternative Workday content extraction patterns...")
             
             # Look for sections with specific text patterns
             content_keywords = [
@@ -1882,12 +1904,12 @@ def extract_workday_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, A
                         content = parent.get_text(separator='\n', strip=True)
                         if len(content) > 200:  # Substantial content
                             description_parts.append(f"Job Information:\n{content}")
-                            logger.info(f"✅ Found job content via keyword matching: {len(content)} characters")
+                            logger.info(f" Found job content via keyword matching: {len(content)} characters")
                             break
         
-        # 🔧 FALLBACK: Extract from main content areas
+        # Extract from main content areas
         if not description_parts:
-            logger.info("🔍 Using fallback content extraction for Workday...")
+            logger.info(" Using fallback content extraction for Workday...")
             
             # Look for main content containers
             main_selectors = [
@@ -1918,7 +1940,7 @@ def extract_workday_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, A
                         combined_content = '\n\n'.join(meaningful_content)
                         if len(combined_content) > 200:
                             description_parts.append(f"Job Content:\n{combined_content}")
-                            logger.info(f"✅ Found content via main container: {len(combined_content)} characters")
+                            logger.info(f" Found content via main container: {len(combined_content)} characters")
                             break
         
         # Combine all description parts
@@ -1977,7 +1999,7 @@ def extract_greenhouse_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str
     """Extract job details from Greenhouse sites using universal extraction"""
     
     try:
-        # Enhanced title extraction for Greenhouse
+        # standard title extraction for Greenhouse
         title_selectors = [
             '.app-title',
             '.posting-headline h2',
@@ -1991,14 +2013,14 @@ def extract_greenhouse_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str
                 job["title"] = title_el.get_text().strip()
                 break
         
-        # Enhanced company extraction for Greenhouse
+        # standard company extraction for Greenhouse
         title_tag = soup.find('title')
         if title_tag and title_tag.get_text():
             title_text = title_tag.get_text()
             if ' at ' in title_text:
                 job["company"] = title_text.split(' at ')[-1].strip()
         
-        # Enhanced location extraction for Greenhouse
+        # standard location extraction for Greenhouse
         location_selectors = [
             '.location',
             '.posting-headline .location',
@@ -2024,7 +2046,7 @@ def extract_lever_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, Any
     """Extract job details from Lever sites using universal extraction"""
     
     try:
-        # Enhanced title extraction for Lever
+        # standard title extraction for Lever
         title_selectors = [
             '.posting-headline h2',
             'h2.posting-title',
@@ -2038,13 +2060,13 @@ def extract_lever_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, Any
                 job["title"] = title_el.get_text().strip()
                 break
         
-        # Enhanced company extraction for Lever
+        # standard company extraction for Lever
         if 'jobs.lever.co' in job.get("url", ""):
             url_parts = job["url"].split('/')
             if len(url_parts) > 3:
                 job["company"] = url_parts[3].replace('-', ' ').title()
         
-        # Enhanced location extraction for Lever
+        # standard location extraction for Lever
         location_selectors = [
             '.posting-categories .location',
             '.location',
@@ -2070,7 +2092,7 @@ def extract_bamboohr_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, 
     """Extract job details from BambooHR sites using universal extraction"""
     
     try:
-        # Enhanced title extraction for BambooHR
+        # standard title extraction for BambooHR
         title_selectors = [
             '.BH-JobBoard-Job-Title',
             'h1.job-title',
@@ -2083,7 +2105,7 @@ def extract_bamboohr_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, 
                 job["title"] = title_el.get_text().strip()
                 break
         
-        # Enhanced company extraction for BambooHR
+        # standard company extraction for BambooHR
         title_tag = soup.find('title')
         if title_tag:
             title_text = title_tag.get_text()
@@ -2100,10 +2122,10 @@ def extract_bamboohr_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, 
     return job
 
 def extract_amazon_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract job details from Amazon Jobs using universal extraction (enhanced)"""
+    """Extract job details from Amazon Jobs using universal extraction (standard)"""
     
     try:
-        # 🚀 ENHANCED: Extract title from URL first (more reliable for Amazon)
+        # Extract title from URL
         job_url = job.get('url', '')
         if job_url and '/jobs/' in job_url:
             # Parse title from Amazon URL structure
@@ -2116,9 +2138,9 @@ def extract_amazon_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, An
                     title_from_url = title_slug.replace('-', ' ').title()
                     if len(title_from_url) > 5 and not title_from_url.isdigit():
                         job["title"] = title_from_url
-                        logger.info(f"📋 Extracted title from URL: {title_from_url}")
+                        logger.info(f" Extracted title from URL: {title_from_url}")
         
-        # Enhanced title extraction for Amazon (fallback)
+        # standard title extraction for Amazon (fallback)
         if not job.get("title") or len(job.get("title", "")) < 5:
             title_selectors = [
                 'h1.header-module_title__3cOil',
@@ -2138,13 +2160,13 @@ def extract_amazon_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, An
                         'amazon.jobs' not in title_text.lower() and
                         len(title_text) > 10):
                         job["title"] = title_text
-                        logger.info(f"📋 Extracted title from page: {title_text}")
+                        logger.info(f" Extracted title from page: {title_text}")
                         break
         
         # Company is always Amazon
         job["company"] = "Amazon"
         
-        # Enhanced location extraction for Amazon
+        # standard location extraction for Amazon
         location_selectors = [
             '[data-test-id="header-location"]',
             '.header-module_location__2P5bY',
@@ -2163,7 +2185,7 @@ def extract_amazon_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, An
                     logger.info(f"📍 Found location: {location_text}")
                     break
         
-        # 🚀 ENHANCED: Try to extract location from job description if not found
+        # Extract location from description
         if not job.get("location") or job.get("location") == "Location":
             full_text = soup.get_text()
             # Look for location patterns in the text
@@ -2187,7 +2209,7 @@ def extract_amazon_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, An
         # Use universal content extraction
         job = extract_universal_job_content(soup, job, "amazon")
         
-        # 🚀 FINAL CLEANUP: Ensure we have at least basic job information
+        # Ensure we have at least basic job information
         if not job.get("title") or job.get("title") in ["Job Position", "Unknown Title"]:
             # Last resort: try to extract from page title
             page_title = soup.find('title')
@@ -2201,7 +2223,7 @@ def extract_amazon_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, An
                         not potential_title.lower().startswith('posted') and
                         'amazon' not in potential_title.lower()):
                         job["title"] = potential_title
-                        logger.info(f"📋 Extracted title from page title: {potential_title}")
+                        logger.info(f" Extracted title from page title: {potential_title}")
         
         # Set default location if still empty
         if not job.get("location") or job.get("location") in ["Location", ""]:
@@ -2315,58 +2337,58 @@ async def batch_job_matching(request: BatchJobMatchRequest):
         
         logger.info(f"🔄 Batch matching {len(request.jobs)} jobs for user {request.user_id}")
         
-        # 🚀 RATE LIMITING: Check OpenAI-specific rate limit
+        # Check OpenAI-specific rate limit
         user_identifier = f"{request.user_id}_batch"
         
         # Check if we have OpenAI API key for intelligent matching
         openai_api_key = os.getenv("OPENAI_API_KEY")
         
-        # 🔍 DEBUG: Add extensive logging
-        logger.info(f"🔍 BATCH DEBUG: OpenAI API key available: {bool(openai_api_key)}")
-        logger.info(f"🔍 BATCH DEBUG: Number of jobs: {len(request.jobs)}")
-        logger.info(f"🔍 BATCH DEBUG: User identifier: {user_identifier}")
+        # Add extensive logging
+        logger.info(f" BATCH DEBUG: OpenAI API key available: {bool(openai_api_key)}")
+        logger.info(f" BATCH DEBUG: Number of jobs: {len(request.jobs)}")
+        logger.info(f" BATCH DEBUG: User identifier: {user_identifier}")
         
-        # 🎯 PRIORITY 1: Try OpenAI first if available and within rate limits
+        # Try OpenAI first if available and within rate limits
         if openai_api_key and len(request.jobs) > 0:
-            logger.info(f"🔍 BATCH DEBUG: Checking OpenAI rate limits...")
+            logger.info(f" BATCH DEBUG: Checking OpenAI rate limits...")
             
             # Check OpenAI rate limit before proceeding
             rate_limit_result = rate_limiter.is_openai_allowed(user_identifier, max_openai_calls=10, window_hours=24)
-            logger.info(f"🔍 BATCH DEBUG: Rate limit check result: {rate_limit_result}")
+            logger.info(f" BATCH DEBUG: Rate limit check result: {rate_limit_result}")
             
             if rate_limit_result:
-                logger.info(f"🔒 OpenAI rate limit check passed for {user_identifier}")
+                logger.info(f" OpenAI rate limit check passed for {user_identifier}")
                 logger.info("🤖 Using OpenAI for realistic, accurate batch analysis")
                 
-                # 🚀 IMPORTANT: Record the OpenAI call BEFORE making the request
+                # Record the OpenAI call BEFORE making the request
                 rate_limiter.record_openai_call(user_identifier)
                 
                 try:
-                    # 🎯 PRIMARY PATH: Use OpenAI for accurate scoring
-                    matched_jobs = await batch_analyze_jobs_with_openai_enhanced(request.jobs, request.resume_data, openai_api_key, use_llama_extraction=True)
+                    # Use OpenAI for accurate scoring
+                    matched_jobs = await batch_analyze_jobs_advanced(request.jobs, request.resume_data, openai_api_key, use_llama_extraction=True)
                     processing_method = "openai_realistic_primary"
                     
-                    logger.info(f"✅ OpenAI analysis completed successfully with realistic scores")
+                    logger.info(f" OpenAI analysis completed successfully with realistic scores")
                     
                 except Exception as e:
-                    logger.error(f"❌ OpenAI analysis failed: {str(e)}")
-                    logger.info("📊 Falling back to conservative similarity matching")
+                    logger.error(f" OpenAI analysis failed: {str(e)}")
+                    logger.info(" Falling back to conservative similarity matching")
                     matched_jobs = await batch_analyze_jobs_similarity(request.jobs, request.resume_data)
                     processing_method = "similarity_fallback_openai_error"
             else:
                 # Rate limit exceeded, use similarity fallback
                 usage_stats = rate_limiter.get_usage_stats(user_identifier)
-                logger.warning(f"🚫 OpenAI rate limit exceeded for user {user_identifier}: {usage_stats}")
-                logger.info("📊 Using conservative similarity matching due to rate limit")
+                logger.warning(f" OpenAI rate limit exceeded for user {user_identifier}: {usage_stats}")
+                logger.info(" Using conservative similarity matching due to rate limit")
                 matched_jobs = await batch_analyze_jobs_similarity(request.jobs, request.resume_data)
                 processing_method = "similarity_fallback_rate_limited"
                 
                 # Add rate limit info to response
-                logger.info(f"⚠️ OpenAI calls exhausted ({usage_stats['openai_calls_last_24h']}/10 daily limit)")
+                logger.info(f" OpenAI calls exhausted ({usage_stats['openai_calls_last_24h']}/10 daily limit)")
         else:
             # No OpenAI API key or no jobs
-            logger.info(f"🔍 BATCH DEBUG: Using similarity fallback - API key: {bool(openai_api_key)}, Jobs: {len(request.jobs)}")
-            logger.info("📊 Using conservative similarity matching (no OpenAI key)")
+            logger.info(f" BATCH DEBUG: Using similarity fallback - API key: {bool(openai_api_key)}, Jobs: {len(request.jobs)}")
+            logger.info(" Using conservative similarity matching (no OpenAI key)")
             matched_jobs = await batch_analyze_jobs_similarity(request.jobs, request.resume_data)
             processing_method = "similarity_conservative_no_openai"
         
@@ -2387,20 +2409,20 @@ async def batch_job_matching(request: BatchJobMatchRequest):
         
         processing_time = int((time.time() - start_time) * 1000)
         
-        logger.info(f"✅ Batch analysis complete: {len(top_jobs)}/{len(request.jobs)} jobs passed threshold")
+        logger.info(f" Batch analysis complete: {len(top_jobs)}/{len(request.jobs)} jobs passed threshold")
         
-        # 🚀 DEBUG: Log the exact response being sent to frontend
+        # Log response
         logger.info("=" * 80)
-        logger.info("🔍 FRONTEND RESPONSE DEBUG")
+        logger.info(" FRONTEND RESPONSE DEBUG")
         logger.info("=" * 80)
-        logger.info(f"📊 Response Summary:")
+        logger.info(f" Response Summary:")
         logger.info(f"   • Success: True")
         logger.info(f"   • Jobs found: {len(request.jobs)}")
         logger.info(f"   • Matches returned: {len(top_jobs)}")
         logger.info(f"   • Processing method: {processing_method}")
         logger.info(f"   • Processing time: {processing_time}ms")
         
-        logger.info(f"\n📋 Individual Job Results:")
+        logger.info(f"\n Individual Job Results:")
         for i, job in enumerate(top_jobs, 1):
             score_source = job.get('score_source', 'unknown')
             logger.info(f"   Job {i}:")
@@ -2437,14 +2459,14 @@ async def batch_job_matching(request: BatchJobMatchRequest):
             processing_method=processing_method
         )
         
-        # 🚀 DEBUG: Log the exact JSON being sent
+        # Log JSON
         logger.info(f"\n📤 FINAL SCORES SUMMARY:")
         logger.info("=" * 80)
         for i, job in enumerate(top_jobs, 1):
             logger.info(f"Job {i}: {job.get('title', 'Unknown')} = {job.get('match_score')}% via {job.get('score_source', 'unknown')}")
         
         logger.info("=" * 80)
-        logger.info("🔍 END FRONTEND RESPONSE DEBUG")
+        logger.info(" END FRONTEND RESPONSE DEBUG")
         logger.info("=" * 80)
         
         return response_data
@@ -2551,8 +2573,7 @@ async def batch_analyze_jobs_with_openai(jobs: List[Dict], resume_data: Dict, ap
         
         client = OpenAI(api_key=api_key)
         
-        # 🚀 Create concise summaries for OpenAI processing (to reduce token costs)
-        logger.info("📝 Creating concise job summaries for OpenAI analysis...")
+        # logger.info("📝 Creating concise job summaries for OpenAI analysis...")
         job_summaries = []
         
         for i, job in enumerate(jobs):
@@ -2592,11 +2613,11 @@ async def batch_analyze_jobs_with_openai(jobs: List[Dict], resume_data: Dict, ap
             "summary": resume_data.get('summary', '')[:300] if resume_data.get('summary') else ''  # Limit summary
         }
         
-        # 🎯 ENHANCED: Create focused prompt that asks OpenAI to be realistic about scoring
+        # Create focused prompt that asks OpenAI to be realistic about scoring
         prompt = f"""
 Analyze {len(job_summaries)} software engineering jobs against this candidate's profile. 
 
-⚠️ IMPORTANT: Be REALISTIC with match scores. A 100% match should be extremely rare - only for perfect fits where the candidate has ALL required skills and experience. Most good matches should be 60-85%.
+ IMPORTANT: Be REALISTIC with match scores. A 100% match should be extremely rare - only for perfect fits where the candidate has ALL required skills and experience. Most good matches should be 60-85%.
 
 CANDIDATE PROFILE:
 Skills: {', '.join(resume_summary.get('skills', []))}
@@ -2655,23 +2676,22 @@ Focus on realistic assessment. Don't inflate scores - be honest about gaps.
         import json
         try:
             ai_analysis = json.loads(ai_response)
-            logger.info(f"✅ Successfully parsed OpenAI analysis for {len(ai_analysis)} jobs")
+            logger.info(f" Successfully parsed OpenAI analysis for {len(ai_analysis)} jobs")
         except json.JSONDecodeError:
-            logger.warning("❌ OpenAI response not valid JSON, using fallback similarity matching")
+            logger.warning(" OpenAI response not valid JSON, using fallback similarity matching")
             return await batch_analyze_jobs_similarity(jobs, resume_data)
         
-        # 🎯 PRIORITY FIX: Use OpenAI scores directly, not similarity scores
+        # Use OpenAI scores directly, not similarity scores
         analyzed_jobs = []
         for i, job in enumerate(jobs):
             ai_result = ai_analysis[i] if i < len(ai_analysis) else {}
             
-            # 🚀 KEY FIX: Use OpenAI's realistic score as the PRIMARY score
+            # Use OpenAI's realistic score as the PRIMARY score
             openai_score = ai_result.get('match_score', 50)
             
             analyzed_job = {
                 **job,  # Keep original full job data
-                "match_score": openai_score,  # 🎯 Use OpenAI score directly
-                "matching_skills": ai_result.get('matching_skills', []),
+                "match_score": openai_score,  # "matching_skills": ai_result.get('matching_skills', []),
                 "missing_skills": ai_result.get('missing_skills', []),
                 "summary": ai_result.get('analysis', 'AI analysis not available'),
                 "confidence": ai_result.get('confidence', 'medium'),
@@ -2681,14 +2701,13 @@ Focus on realistic assessment. Don't inflate scores - be honest about gaps.
             }
             analyzed_jobs.append(analyzed_job)
             
-            # 🔍 Log the realistic scoring
-            logger.info(f"🎯 Job {i+1}: {job.get('title', 'Unknown')} - OpenAI Score: {openai_score}%")
+            # logger.info(f" Job {i+1}: {job.get('title', 'Unknown')} - OpenAI Score: {openai_score}%")
         
-        logger.info(f"✅ OpenAI realistic batch analysis complete for {len(analyzed_jobs)} jobs")
+        logger.info(f" OpenAI realistic batch analysis complete for {len(analyzed_jobs)} jobs")
         return analyzed_jobs
         
     except Exception as e:
-        logger.error(f"❌ OpenAI batch analysis failed: {str(e)}")
+        logger.error(f" OpenAI batch analysis failed: {str(e)}")
         # Fallback to similarity matching
         return await batch_analyze_jobs_similarity(jobs, resume_data)
 
@@ -2698,7 +2717,7 @@ async def batch_analyze_jobs_similarity(jobs: List[Dict], resume_data: Dict) -> 
     Reduced inflated scoring and made it more honest about limitations
     """
     try:
-        logger.info(f"📊 Using similarity matching as fallback for {len(jobs)} jobs")
+        logger.info(f" Using similarity matching as fallback for {len(jobs)} jobs")
         
         # Common words to exclude from matching
         common_words = {'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'a', 'an', 'as', 'are', 'was', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'must', 'can', 'is', 'am', 'we', 'you', 'they', 'them', 'their', 'this', 'that', 'these', 'those', 'if', 'when', 'where', 'how', 'why', 'what', 'who', 'which'}
@@ -2713,7 +2732,7 @@ async def batch_analyze_jobs_similarity(jobs: List[Dict], resume_data: Dict) -> 
             try:
                 job_text_lower = str(job.get('description', '')).lower()
                 
-                # 🎯 MORE REALISTIC: Start with lower base scores
+                # Start with lower base scores
                 skill_matches = []
                 skill_match_count = 0
                 
@@ -2723,7 +2742,7 @@ async def batch_analyze_jobs_similarity(jobs: List[Dict], resume_data: Dict) -> 
                         skill_matches.append(skill)
                         skill_match_count += 1
                 
-                # 🎯 REALISTIC SCORING: Much more conservative
+                # Much more conservative
                 if skill_match_count >= 6:  # Has most skills
                     base_score = 75  # Reduced from inflated scores
                 elif skill_match_count >= 4:  # Has good skills
@@ -2735,18 +2754,18 @@ async def batch_analyze_jobs_similarity(jobs: List[Dict], resume_data: Dict) -> 
                 else:  # No clear skill matches
                     base_score = 35
                 
-                # 🎯 CONSERVATIVE BONUSES: Much smaller bonuses
+                # Much smaller bonuses
                 tech_bonus = 0
                 tech_terms = ['api', 'database', 'cloud', 'agile']  # Reduced list
                 tech_matches = [term for term in tech_terms if term in job_text_lower]
                 if tech_matches:
                     tech_bonus = min(len(tech_matches) * 2, 8)  # Max 8 points from tech terms
                 
-                # 🎯 REALISTIC FINAL SCORE: Cap at reasonable level for similarity matching
+                # Cap at reasonable level for similarity matching
                 final_score = min(base_score + tech_bonus, 78)  # Cap at 78% for similarity matching
                 final_score = max(final_score, 30)  # Minimum 30%
                 
-                # 🎯 HONEST SUMMARY: Acknowledge limitations of similarity matching
+                # Acknowledge limitations of similarity matching
                 summary = f"Similarity match: {final_score}% (found {skill_match_count} matching skills). Note: This is basic keyword matching - OpenAI analysis would be more accurate."
                 
                 analyzed_job = {
@@ -2764,7 +2783,7 @@ async def batch_analyze_jobs_similarity(jobs: List[Dict], resume_data: Dict) -> 
                 }
                 analyzed_jobs.append(analyzed_job)
                 
-                logger.info(f"📊 Job {i+1}: {job.get('title', 'Unknown')} - Similarity Score: {final_score}% ({skill_match_count} skills)")
+                logger.info(f" Job {i+1}: {job.get('title', 'Unknown')} - Similarity Score: {final_score}% ({skill_match_count} skills)")
                 
             except Exception as e:
                 logger.error(f"Error processing job {i+1}: {str(e)}")
@@ -2780,7 +2799,7 @@ async def batch_analyze_jobs_similarity(jobs: List[Dict], resume_data: Dict) -> 
                 }
                 analyzed_jobs.append(analyzed_job)
         
-        logger.info(f"✅ Conservative similarity analysis complete for {len(analyzed_jobs)} jobs")
+        logger.info(f" Conservative similarity analysis complete for {len(analyzed_jobs)} jobs")
         return analyzed_jobs
         
     except Exception as e:
@@ -2926,8 +2945,8 @@ async def create_llama_context_extraction(job: Dict[str, Any]) -> Dict[str, Any]
         if len(full_description) <= 2000:
             return job
         
-        # 🔍 DEBUG: Print original job description details
-        print(f"\n🚀 GROQ EXTRACTION DEMO for: {title} at {company}")
+        # Print original job description details
+        print(f"\n GROQ EXTRACTION DEMO for: {title} at {company}")
         print("=" * 60)
         print(f"📄 Original Description Length: {len(full_description)} characters")
         print("📄 Original Description Preview:")
@@ -2935,7 +2954,7 @@ async def create_llama_context_extraction(job: Dict[str, Any]) -> Dict[str, Any]
         print(full_description[:800] + "..." if len(full_description) > 800 else full_description)
         print("-" * 40)
         
-        # 🎯 SMART: Reduce input size to avoid rate limits
+        # Reduce input size to avoid rate limits
         # Limit to 6000 characters to stay within token limits
         smart_description = full_description[:6000]
         if len(full_description) > 6000:
@@ -2962,7 +2981,7 @@ Focus only on information that helps determine if a candidate is a good fit. Be 
 
 Extracted Summary:"""
 
-        # 🚀 Priority 1: Groq (Very fast, free Llama API - 6,000 requests/day)
+        # Groq (Very fast, free Llama API - 6,000 requests/day)
         if os.getenv('GROQ_API_KEY'):
             try:
                 import requests
@@ -2986,8 +3005,8 @@ Extracted Summary:"""
                 elif len(full_description) > 2000:  # Long descriptions
                     safe_batch_size = 4
                 
-                logger.info(f"📊 Job description length: {len(full_description)} chars")
-                logger.info(f"🎯 Safe batch size for this job: {safe_batch_size}")
+                logger.info(f" Job description length: {len(full_description)} chars")
+                logger.info(f" Safe batch size for this job: {safe_batch_size}")
                 
                 payload = {
                     "model": "llama3-70b-8192",  # Fast and very capable model
@@ -3030,9 +3049,9 @@ Extracted Summary:"""
                                 # Create final description with structure
                                 final_description = f"Position: {title} at {company}\n\n{llama_summary}"
                                 
-                                # 🔍 ENHANCED LOGGING: Show actual Groq content for debugging
-                                logger.info("✅ Groq extraction successful!")
-                                logger.info(f"📊 Compression: {len(full_description)} → {len(final_description)} chars ({len(final_description)/len(full_description)*100:.1f}%)")
+                                # Show actual Groq content for debugging
+                                logger.info(" Groq extraction successful!")
+                                logger.info(f" Compression: {len(full_description)} → {len(final_description)} chars ({len(final_description)/len(full_description)*100:.1f}%)")
                                 logger.info("🧠 GROQ EXTRACTED SUMMARY:")
                                 logger.info("-" * 60)
                                 logger.info(f"Job: {title} at {company}")
@@ -3040,7 +3059,7 @@ Extracted Summary:"""
                                 logger.info(llama_summary)
                                 logger.info("-" * 60)
                                 logger.info(f"📝 Summary length: {len(llama_summary)} chars")
-                                logger.info(f"🎯 Final description length: {len(final_description)} chars")
+                                logger.info(f" Final description length: {len(final_description)} chars")
                                 logger.info("=" * 80)
                                 
                                 job_summary = job.copy()
@@ -3050,10 +3069,10 @@ Extracted Summary:"""
                                 job_summary['extraction_method'] = 'groq_llama_extraction'
                                 job_summary['compression_ratio'] = f"{len(final_description)/len(full_description)*100:.1f}%"
                                 
-                                logger.info(f"🚀 Groq extracted '{title}': {len(full_description)} → {len(final_description)} chars ({job_summary['compression_ratio']})")
+                                logger.info(f" Groq extracted '{title}': {len(full_description)} → {len(final_description)} chars ({job_summary['compression_ratio']})")
                                 return job_summary
                             else:
-                                logger.error(f"❌ Groq returned empty or too short summary: {len(llama_summary) if llama_summary else 0} chars")
+                                logger.error(f" Groq returned empty or too short summary: {len(llama_summary) if llama_summary else 0} chars")
                         
                         elif response.status_code == 429:  # Rate limit
                             error_data = response.json()
@@ -3071,7 +3090,7 @@ Extracted Summary:"""
                                 except:
                                     pass
                             
-                            logger.warning(f"⚠️  Rate limit hit (attempt {attempt + 1}/{max_retries})")
+                            logger.warning(f"  Rate limit hit (attempt {attempt + 1}/{max_retries})")
                             logger.warning(f"⏳ Waiting {wait_time:.1f} seconds before retry...")
                             logger.warning(f"🚨 GROQ RATE LIMIT: {response.status_code} - {error_message}")
                             
@@ -3079,8 +3098,8 @@ Extracted Summary:"""
                                 time.sleep(wait_time)
                                 continue
                             else:
-                                logger.error(f"❌ Max Groq retries reached. Using fallback extraction.")
-                                logger.error("💡 Tip: Process fewer jobs at once or upgrade Groq tier")
+                                logger.error(f" Max Groq retries reached. Using fallback extraction.")
+                                logger.error(" Tip: Process fewer jobs at once or upgrade Groq tier")
                                 logger.error(f"🔢 Current batch size: {safe_batch_size} jobs")
                                 break
                         else:
@@ -3090,8 +3109,8 @@ Extracted Summary:"""
                                 error_message = error_json.get('error', {}).get('message', error_message)
                             except:
                                 pass
-                            logger.error(f"❌ Groq API error: {response.status_code} - {error_message}")
-                            logger.error(f"🔍 Request details: URL={groq_url}, Headers={headers.keys()}, Payload size={len(str(payload))} chars")
+                            logger.error(f" Groq API error: {response.status_code} - {error_message}")
+                            logger.error(f" Request details: URL={groq_url}, Headers={headers.keys()}, Payload size={len(str(payload))} chars")
                             break
                     
                     except requests.exceptions.Timeout:
@@ -3103,20 +3122,20 @@ Extracted Summary:"""
                             break
                     
                     except Exception as e:
-                        logger.error(f"❌ Groq request failed: {str(e)}")
-                        logger.error(f"🔍 Error type: {type(e).__name__}")
+                        logger.error(f" Groq request failed: {str(e)}")
+                        logger.error(f" Error type: {type(e).__name__}")
                         import traceback
                         logger.error(f"📚 Stack trace:\n{traceback.format_exc()}")
                         break
                 
                 # If we get here, Groq failed - mark it as failed and continue to fallbacks
-                logger.error("❌ Groq extraction completely failed - trying fallback methods")
+                logger.error(" Groq extraction completely failed - trying fallback methods")
             
             except Exception as e:
-                logger.error(f"❌ Groq extraction failed: {str(e)}")
+                logger.error(f" Groq extraction failed: {str(e)}")
                 logger.warning(f"Groq extraction failed: {str(e)}")
         else:
-            logger.warning("❌ GROQ_API_KEY not found - skipping Groq extraction")
+            logger.warning(" GROQ_API_KEY not found - skipping Groq extraction")
         
         # 🏠 Priority 2: Ollama Local (Free, requires local setup)
         if os.getenv('OLLAMA_AVAILABLE', '').lower() == 'true':
@@ -3207,13 +3226,13 @@ Extracted Summary:"""
         return create_concise_job_summary(job)
         
     except Exception as e:
-        logger.error(f"❌ Error in LLM context extraction: {str(e)}")
+        logger.error(f" Error in LLM context extraction: {str(e)}")
         return create_concise_job_summary(job)
 
 # Update the batch analysis to use Llama extraction
-async def batch_analyze_jobs_with_openai_enhanced(jobs: List[Dict], resume_data: Dict, api_key: str, use_llama_extraction: bool = True) -> List[Dict]:
+async def batch_analyze_jobs_advanced(jobs: List[Dict], resume_data: Dict, api_key: str, use_llama_extraction: bool = True) -> List[Dict]:
     """
-    Enhanced batch job analysis with Llama-powered context extraction
+    Advanced batch job analysis with Llama-powered context extraction
     Two-stage process: Llama for extraction, OpenAI for matching
     """
     try:
@@ -3221,39 +3240,37 @@ async def batch_analyze_jobs_with_openai_enhanced(jobs: List[Dict], resume_data:
         from openai import OpenAI
         import time
         
-        # 🚀 Add start_time for logging
-        start_time = time.time()
+        # start_time = time.time()
         
-        # 🔍 DEBUG: Add extensive logging
-        logger.info(f"🔍 OPENAI ENHANCED DEBUG: FUNCTION ENTRY")
-        logger.info(f"🔍 OPENAI ENHANCED DEBUG: Starting with {len(jobs)} jobs")
-        logger.info(f"🔍 OPENAI ENHANCED DEBUG: API key length: {len(api_key) if api_key else 0}")
-        logger.info(f"🔍 OPENAI ENHANCED DEBUG: use_llama_extraction: {use_llama_extraction}")
-        logger.info(f"🔍 OPENAI ENHANCED DEBUG: Resume data available: {bool(resume_data)}")
+        # Add extensive logging
+        logger.info(f" OPENAI standard DEBUG: FUNCTION ENTRY")
+        logger.info(f" OPENAI standard DEBUG: Starting with {len(jobs)} jobs")
+        logger.info(f" OPENAI standard DEBUG: API key length: {len(api_key) if api_key else 0}")
+        logger.info(f" OPENAI standard DEBUG: use_llama_extraction: {use_llama_extraction}")
+        logger.info(f" OPENAI standard DEBUG: Resume data available: {bool(resume_data)}")
         
-        # 🚀 NEW DEBUG: Log actual resume_data structure
-        logger.info(f"🔍 RESUME DEBUG: Resume data type: {type(resume_data)}")
-        logger.info(f"🔍 RESUME DEBUG: Resume data keys: {list(resume_data.keys()) if isinstance(resume_data, dict) else 'Not a dict'}")
+        # Log actual resume_data structure
+        logger.info(f" RESUME DEBUG: Resume data type: {type(resume_data)}")
+        logger.info(f" RESUME DEBUG: Resume data keys: {list(resume_data.keys()) if isinstance(resume_data, dict) else 'Not a dict'}")
         if isinstance(resume_data, dict):
-            logger.info(f"🔍 RESUME DEBUG: Skills count: {len(resume_data.get('skills', []))}")
-            logger.info(f"🔍 RESUME DEBUG: Experience count: {len(resume_data.get('experience', []))}")
-            logger.info(f"🔍 RESUME DEBUG: Education count: {len(resume_data.get('education', []))}")
-            logger.info(f"🔍 RESUME DEBUG: Summary length: {len(str(resume_data.get('summary', '')))}")
+            logger.info(f" RESUME DEBUG: Skills count: {len(resume_data.get('skills', []))}")
+            logger.info(f" RESUME DEBUG: Experience count: {len(resume_data.get('experience', []))}")
+            logger.info(f" RESUME DEBUG: Education count: {len(resume_data.get('education', []))}")
+            logger.info(f" RESUME DEBUG: Summary length: {len(str(resume_data.get('summary', '')))}")
             
             # Log first experience item structure if available
             experience_list = resume_data.get('experience', [])
             if experience_list and len(experience_list) > 0:
                 first_exp = experience_list[0]
-                logger.info(f"🔍 RESUME DEBUG: First experience type: {type(first_exp)}")
+                logger.info(f" RESUME DEBUG: First experience type: {type(first_exp)}")
                 if isinstance(first_exp, dict):
-                    logger.info(f"🔍 RESUME DEBUG: First experience keys: {list(first_exp.keys())}")
-                    logger.info(f"🔍 RESUME DEBUG: Has technologies field: {'technologies' in first_exp}")
+                    logger.info(f" RESUME DEBUG: First experience keys: {list(first_exp.keys())}")
+                    logger.info(f" RESUME DEBUG: Has technologies field: {'technologies' in first_exp}")
         
         client = OpenAI(api_key=api_key)
         
-        logger.info(f"🔍 OPENAI ENHANCED DEBUG: OpenAI client created successfully")
+        logger.info(f" OPENAI standard DEBUG: OpenAI client created successfully")
         
-        # 🚀 Validate input data
         if not isinstance(jobs, list):
             logger.error(f"Jobs parameter must be a list, got {type(jobs)}")
             return await batch_analyze_jobs_similarity(jobs, resume_data)
@@ -3280,45 +3297,45 @@ async def batch_analyze_jobs_with_openai_enhanced(jobs: List[Dict], resume_data:
             logger.error("No valid job dictionaries found")
             return await batch_analyze_jobs_similarity(jobs, resume_data)
         
-        # 🚀 GROQ RATE LIMIT PROTECTION: Limit batch size to prevent 429 errors
+        # Limit batch size to prevent 429 errors
         if use_llama_extraction and os.getenv('GROQ_API_KEY'):
             # Groq free tier: 6k tokens/minute limit
             # With ~600 tokens per job, max 5-6 jobs per minute
             max_groq_batch_size = 5
             if len(valid_jobs) > max_groq_batch_size:
                 logger.warning(f"🚨 GROQ PROTECTION: Batch size {len(valid_jobs)} exceeds safe limit of {max_groq_batch_size}")
-                logger.warning(f"💡 Processing first {max_groq_batch_size} jobs to avoid rate limits")
-                logger.warning(f"🔧 Consider splitting large batches or upgrading Groq tier")
+                logger.warning(f" Processing first {max_groq_batch_size} jobs to avoid rate limits")
+                logger.warning(f" Consider splitting large batches or upgrading Groq tier")
                 valid_jobs = valid_jobs[:max_groq_batch_size]
         
-        logger.info(f"🔍 Processing {len(valid_jobs)} valid jobs out of {len(jobs)} total")
+        logger.info(f" Processing {len(valid_jobs)} valid jobs out of {len(jobs)} total")
         
-        # 🚀 Stage 1: Use smart extraction for job summaries
+        # Use smart extraction for job summaries
         if use_llama_extraction:
-            logger.info("🧠 Using Groq + smart extraction for enhanced job summaries...")
+            logger.info("🧠 Using Groq + smart extraction for standard job summaries...")
             job_summaries = []
             
             for i, job in enumerate(valid_jobs):
                 try:
-                    # 🎯 PRIORITY 1: Try Groq extraction for intelligent summarization
+                    # Try Groq extraction for intelligent summarization
                     if os.getenv('GROQ_API_KEY'):
                         logger.info(f"🔄 Job {i+1}/{len(jobs)}: Trying Groq extraction for '{job.get('title', 'Unknown')}'")
-                        groq_enhanced_job = await create_llama_context_extraction(job)
-                        # logger.info("groq_enhanced_job",groq_enhanced_job)
+                        groq_processed_job = await create_llama_context_extraction(job)
+                        # logger.info("groq_processed_job",groq_processed_job)
                         
                         # Check if Groq extraction was successful by looking for Groq-specific formatting
-                        if (groq_enhanced_job and 
-                            groq_enhanced_job.get('description') and 
-                            len(groq_enhanced_job.get('description', '')) > 200 and
-                            ('Position:' in groq_enhanced_job.get('description', '') or 
-                             groq_enhanced_job.get('extraction_method') == 'groq_llama_extraction')):
+                        if (groq_processed_job and 
+                            groq_processed_job.get('description') and 
+                            len(groq_processed_job.get('description', '')) > 200 and
+                            ('Position:' in groq_processed_job.get('description', '') or 
+                             groq_processed_job.get('extraction_method') == 'groq_llama_extraction')):
                             
-                            # Use Groq-enhanced summary
-                            job_summary = groq_enhanced_job
-                            logger.info(f"✅ Job {i+1}: Groq success - {groq_enhanced_job.get('compression_ratio', 'N/A')} compression")
+                            # Use Groq-standard summary
+                            job_summary = groq_processed_job
+                            logger.info(f" Job {i+1}: Groq success - {groq_processed_job.get('compression_ratio', 'N/A')} compression")
                         else:
                             # Groq failed, use smart extraction fallback
-                            logger.info(f"⚠️ Job {i+1}: Groq failed, using smart extraction fallback")
+                            logger.info(f" Job {i+1}: Groq failed, using smart extraction fallback")
                             job_summary = create_concise_job_summary(job)
                     else:
                         # No Groq API key, use smart extraction
@@ -3344,7 +3361,7 @@ async def batch_analyze_jobs_with_openai_enhanced(jobs: List[Dict], resume_data:
                         await asyncio.sleep(2.5)  # 2.5 second delay between Groq requests for rate limiting
                     
                 except Exception as e:
-                    logger.error(f"❌ Job {i+1}: Error in summarization: {str(e)}")
+                    logger.error(f" Job {i+1}: Error in summarization: {str(e)}")
                     # Ultra-basic fallback
                     job_summary = create_concise_job_summary(job)
                     summary = {
@@ -3363,8 +3380,8 @@ async def batch_analyze_jobs_with_openai_enhanced(jobs: List[Dict], resume_data:
             logger.error("No job summaries created, falling back to similarity matching")
             return await batch_analyze_jobs_similarity(jobs, resume_data)
         
-        # 🚀 DEBUG: Log summaries status
-        logger.info(f"🔍 OPENAI ENHANCED DEBUG: Created {len(job_summaries)} job summaries")
+        # Log summaries status
+        logger.info(f" OPENAI standard DEBUG: Created {len(job_summaries)} job summaries")
         
         # Calculate processing statistics
         total_original = sum(s.get('original_length', 0) for s in job_summaries)
@@ -3373,8 +3390,8 @@ async def batch_analyze_jobs_with_openai_enhanced(jobs: List[Dict], resume_data:
         
         logger.info(f"💰 Context extraction: {total_original} → {total_summary} chars ({savings} of original)")
         
-        # 🎯 Stage 2: Use OpenAI for intelligent job-resume matching
-        logger.info("🔍 OPENAI ENHANCED DEBUG: STARTING OPENAI STAGE...")
+        # Use OpenAI for intelligent job-resume matching
+        logger.info(" OPENAI standard DEBUG: STARTING OPENAI STAGE...")
         logger.info("🤖 Using OpenAI for intelligent job-resume matching...")
         
         # Prepare focused resume summary
@@ -3393,11 +3410,10 @@ async def batch_analyze_jobs_with_openai_enhanced(jobs: List[Dict], resume_data:
             "summary": str(resume_data.get('summary', ''))[:400] if resume_data.get('summary') else ''
         }
         
-        # 🚀 DEBUG: Log resume summary
-        logger.info(f"🔍 OPENAI ENHANCED DEBUG: Resume skills: {len(resume_summary.get('skills', []))}")
-        logger.info(f"🔍 OPENAI ENHANCED DEBUG: Resume experience: {len(resume_summary.get('experience', []))}")
+        # Log resume summary
+        logger.info(f" OPENAI standard DEBUG: Resume skills: {len(resume_summary.get('skills', []))}")
+        logger.info(f" OPENAI standard DEBUG: Resume experience: {len(resume_summary.get('experience', []))}")
         
-        # Create enhanced matching prompt
         newline = chr(10)
         matching_prompt = f"""
 Analyze {len(job_summaries)} software engineering positions against this candidate's profile. The job descriptions have been intelligently extracted to preserve context and technical nuance.
@@ -3434,9 +3450,9 @@ Provide concise analysis in JSON format:
 Focus on accurate assessment based on the contextual job information provided.
 """
 
-        # 🚀 DEBUG: Log prompt details
-        logger.info(f"🔍 OPENAI ENHANCED DEBUG: Prompt length: {len(matching_prompt)} characters")
-        logger.info(f"🔍 OPENAI ENHANCED DEBUG: About to call OpenAI API...")
+        # Log prompt details
+        logger.info(f" OPENAI standard DEBUG: Prompt length: {len(matching_prompt)} characters")
+        logger.info(f" OPENAI standard DEBUG: About to call OpenAI API...")
 
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
@@ -3448,19 +3464,19 @@ Focus on accurate assessment based on the contextual job information provided.
             temperature=0.3
         )
         
-        # 🚀 DEBUG: Log OpenAI response
-        logger.info(f"🔍 OPENAI ENHANCED DEBUG: OpenAI API call successful!")
+        # Log OpenAI response
+        logger.info(f" OPENAI standard DEBUG: OpenAI API call successful!")
         
         # Parse and process results
         ai_response = response.choices[0].message.content
-        logger.info(f"🤖 OpenAI enhanced matching response: {len(ai_response)} characters")
+        logger.info(f"🤖 OpenAI standard matching response: {len(ai_response)} characters")
         
-        # 🔍 DEBUG: Log the actual response to understand the format
-        logger.info(f"🔍 OPENAI RESPONSE DEBUG: First 500 chars: {ai_response[:500]}")
+        # Log the actual response to understand the format
+        logger.info(f" OPENAI RESPONSE DEBUG: First 500 chars: {ai_response[:500]}")
         
         # Check if response is empty or None
         if not ai_response or ai_response.strip() == "":
-            logger.warning("❌ OpenAI returned empty response, using fallback")
+            logger.warning(" OpenAI returned empty response, using fallback")
             return await batch_analyze_jobs_similarity(jobs, resume_data)
         
         # Try to parse JSON response
@@ -3468,10 +3484,10 @@ Focus on accurate assessment based on the contextual job information provided.
         try:
             # Try to parse as JSON directly
             ai_analysis = json.loads(ai_response)
-            logger.info(f"✅ Successfully parsed JSON response with {len(ai_analysis)} items")
+            logger.info(f" Successfully parsed JSON response with {len(ai_analysis)} items")
         except json.JSONDecodeError as e:
-            logger.warning(f"❌ JSON parsing failed: {str(e)}")
-            logger.info(f"🔍 Attempting to extract JSON from response...")
+            logger.warning(f" JSON parsing failed: {str(e)}")
+            logger.info(f" Attempting to extract JSON from response...")
             
             # Try to extract JSON from markdown code blocks or other formats
             import re
@@ -3481,9 +3497,9 @@ Focus on accurate assessment based on the contextual job information provided.
             if json_match:
                 try:
                     ai_analysis = json.loads(json_match.group(1))
-                    logger.info(f"✅ Extracted JSON from code block with {len(ai_analysis)} items")
+                    logger.info(f" Extracted JSON from code block with {len(ai_analysis)} items")
                 except json.JSONDecodeError:
-                    logger.warning("❌ Failed to parse JSON from code block")
+                    logger.warning(" Failed to parse JSON from code block")
                     logger.warning("OpenAI response not valid JSON, using fallback")
                     return await batch_analyze_jobs_similarity(jobs, resume_data)
             else:
@@ -3492,13 +3508,13 @@ Focus on accurate assessment based on the contextual job information provided.
                 if json_match:
                     try:
                         ai_analysis = json.loads(json_match.group(1))
-                        logger.info(f"✅ Extracted JSON array with {len(ai_analysis)} items")
+                        logger.info(f" Extracted JSON array with {len(ai_analysis)} items")
                     except json.JSONDecodeError:
-                        logger.warning("❌ Failed to parse extracted JSON array")
+                        logger.warning(" Failed to parse extracted JSON array")
                         logger.warning("OpenAI response not valid JSON, using fallback")
                         return await batch_analyze_jobs_similarity(jobs, resume_data)
                 else:
-                    logger.warning("❌ No JSON found in OpenAI response")
+                    logger.warning(" No JSON found in OpenAI response")
                     logger.warning("OpenAI response not valid JSON, using fallback")
                     return await batch_analyze_jobs_similarity(jobs, resume_data)
         
@@ -3515,7 +3531,7 @@ Focus on accurate assessment based on the contextual job information provided.
                 "growth_potential": ai_result.get('growth_potential', 50),
                 "matching_skills": ai_result.get('matching_skills', []) if isinstance(ai_result.get('matching_skills'), list) else [],
                 "missing_skills": ai_result.get('missing_skills', []) if isinstance(ai_result.get('missing_skills'), list) else [],
-                "summary": ai_result.get('analysis', 'Enhanced analysis not available'),
+                "summary": ai_result.get('analysis', 'standard analysis not available'),
                 "confidence": ai_result.get('confidence', 'medium'),
                 "ai_analysis": ai_result.get('analysis', ''),
                 "processing_method": "openai_realistic_primary",  # Fixed to show correct method
@@ -3523,13 +3539,13 @@ Focus on accurate assessment based on the contextual job information provided.
             }
             analyzed_jobs.append(analyzed_job)
         
-        logger.info(f"🔍 OPENAI ENHANCED DEBUG: Completed successfully with {len(analyzed_jobs)} analyzed jobs")
-        logger.info(f"✅ Enhanced two-stage analysis complete for {len(analyzed_jobs)} jobs")
+        logger.info(f" OPENAI standard DEBUG: Completed successfully with {len(analyzed_jobs)} analyzed jobs")
+        logger.info(f" standard two-stage analysis complete for {len(analyzed_jobs)} jobs")
         return analyzed_jobs
         
     except Exception as e:
-        logger.error(f"Enhanced batch analysis failed: {str(e)}")
-        logger.error(f"🔍 OPENAI ENHANCED DEBUG: Exception in main try block")
+        logger.error(f"standard batch analysis failed: {str(e)}")
+        logger.error(f" OPENAI standard DEBUG: Exception in main try block")
         logger.error(f"Full traceback: {traceback.format_exc()}")
         return await batch_analyze_jobs_similarity(jobs, resume_data)
 
@@ -3558,7 +3574,7 @@ def detect_embedded_job_platform(url: str, page_content: Dict[str, Any]) -> str:
     elif 'jobvite.com' in url_lower:
         return 'jobvite'
     
-    # 🎯 ENHANCED: Check page content for embedded indicators (more comprehensive)
+    # Check page content for embedded indicators (more comprehensive)
     if ('ashby' in page_text and 
         ('ashby_embed' in page_text or 'ashby-job-posting' in page_text or 'ashby_jid' in page_text)):
         return 'ashby'
@@ -3571,11 +3587,11 @@ def detect_embedded_job_platform(url: str, page_content: Dict[str, Any]) -> str:
     elif 'bamboohr' in page_text and 'bamboo-job' in page_text:
         return 'bamboohr'
     
-    # 🚀 NEW: Additional detection for common patterns
+    # Additional detection for common patterns
     # Check for specific div IDs and classes that indicate job board embeds
     if ('id="ashby_embed"' in page_text or 'id=\'ashby_embed\'' in page_text or
         'class="ashby-embed"' in page_text or 'ashby embed' in page_text):
-        logger.info("🎯 Detected Ashby embed div - jobs load dynamically")
+        logger.info(" Detected Ashby embed div - jobs load dynamically")
         return 'ashby'
     
     # Check for other job board indicators
@@ -3598,9 +3614,9 @@ def extract_ashby_jobs_fallback(url: str) -> List[Dict[str, Any]]:
         import requests
         from bs4 import BeautifulSoup
         
-        logger.info(f"🔧 Ashby fallback extraction for: {url}")
+        logger.info(f" Ashby fallback extraction for: {url}")
         
-        # Enhanced headers for Ashby
+        # headers for Ashby
         headers = {
             'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -3617,10 +3633,10 @@ def extract_ashby_jobs_fallback(url: str) -> List[Dict[str, Any]]:
         
         scraped_jobs = []
         
-        # 🎯 PRIORITY 1: Check for Ashby embed div first
+        # Check for Ashby embed div first
         ashby_embed = soup.find('div', id='ashby_embed') or soup.find(class_='ashby-embed')
         if ashby_embed:
-            logger.info("🎯 Found Ashby embed div - jobs are loaded dynamically via JavaScript")
+            logger.info(" Found Ashby embed div - jobs are loaded dynamically via JavaScript")
             
             # Create an informative job entry for dynamic loading
             company_name = extract_company_from_url(url)
@@ -3649,7 +3665,7 @@ Based on their careers page, {company_name} appears to be actively hiring and me
                 "user_guidance": "Visit page directly and wait for jobs to load"
             }]
         
-        # 🎯 PRIORITY 2: Look for already-loaded Ashby jobs
+        # Look for already-loaded Ashby jobs
         ashby_selectors = [
             'a[href*="ashby_jid="]',  # Direct Ashby job ID links
             '.ashby-job-posting-brief',  # Ashby job posting containers
@@ -3756,7 +3772,7 @@ Based on their careers page, {company_name} appears to be actively hiring and me
                             "platform": "ashby"
                         }
                         scraped_jobs.append(scraped_job)
-                        logger.info(f"✅ Extracted Ashby job: {title} - {location}")
+                        logger.info(f" Extracted Ashby job: {title} - {location}")
                         
                         # Limit to prevent overwhelming results
                         if len(scraped_jobs) >= 20:
@@ -3975,7 +3991,7 @@ def extract_generic_jobs_fallback(url: str) -> List[Dict[str, Any]]:
         import requests
         from bs4 import BeautifulSoup
         
-        logger.info(f"🔍 Attempting generic job scraping from: {url}")
+        logger.info(f" Attempting generic job scraping from: {url}")
         
         headers = {
             'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -4027,13 +4043,13 @@ def extract_generic_jobs_fallback(url: str) -> List[Dict[str, Any]]:
         for selector in job_selectors:
             job_links = soup.select(selector)
             if job_links:
-                logger.info(f"✅ Found {len(job_links)} job links using selector: {selector}")
+                logger.info(f" Found {len(job_links)} job links using selector: {selector}")
                 
                 for i, link in enumerate(job_links[:10]):  # Limit to first 10
                     href = link.get('href', '')
                     title = link.get_text(strip=True)
                     
-                    # Enhanced URL validation
+                    # URL validation
                     if not href or not title or len(title) < 3:
                         continue
                     
@@ -4081,7 +4097,7 @@ def extract_generic_jobs_fallback(url: str) -> List[Dict[str, Any]]:
         return scraped_jobs
         
     except Exception as e:
-        logger.error(f"❌ Generic fallback extraction failed: {str(e)}")
+        logger.error(f" Generic fallback extraction failed: {str(e)}")
         return []
 
 def extract_deutsche_bank_job(soup: BeautifulSoup, job: Dict[str, Any], job_url: str) -> Dict[str, Any]:
@@ -4115,7 +4131,7 @@ def extract_deutsche_bank_job(soup: BeautifulSoup, job: Dict[str, Any], job_url:
             if potential_title and len(potential_title) > 5 and 'Deutsche Bank' not in potential_title:
                 job["title"] = potential_title
                 title_found = True
-                logger.info(f"📋 Found title in meta tag: {potential_title}")
+                logger.info(f" Found title in meta tag: {potential_title}")
         
         # Method 2: Look for title in page title
         if not title_found:
@@ -4128,7 +4144,7 @@ def extract_deutsche_bank_job(soup: BeautifulSoup, job: Dict[str, Any], job_url:
                     if potential_title and len(potential_title) > 5:
                         job["title"] = potential_title
                         title_found = True
-                        logger.info(f"📋 Found title in page title: {potential_title}")
+                        logger.info(f" Found title in page title: {potential_title}")
         
         # Method 3: Look for structured data
         if not title_found:
@@ -4140,7 +4156,7 @@ def extract_deutsche_bank_job(soup: BeautifulSoup, job: Dict[str, Any], job_url:
                     if isinstance(data, dict) and data.get('title'):
                         job["title"] = data['title']
                         title_found = True
-                        logger.info(f"📋 Found title in structured data: {data['title']}")
+                        logger.info(f" Found title in structured data: {data['title']}")
                         break
                 except:
                     continue
@@ -4220,15 +4236,15 @@ Note: This is a dynamic job posting. For complete details, please visit the orig
             job["title"] = "Software Engineer"
         
         # Add Deutsche Bank specific metadata
-        job["extraction_method"] = "deutsche_bank_enhanced"
+        job["extraction_method"] = "deutsche_bank_standard"
         job["requires_dynamic_loading"] = True
         job["job_id"] = job_id
         
-        logger.info(f"✅ Deutsche Bank extraction completed: {job['title']} at {job['company']}")
+        logger.info(f" Deutsche Bank extraction completed: {job['title']} at {job['company']}")
         logger.info(f"📄 Description length: {len(job.get('description', ''))}")
         
     except Exception as e:
-        logger.error(f"❌ Error extracting Deutsche Bank job: {str(e)}")
+        logger.error(f" Error extracting Deutsche Bank job: {str(e)}")
         # Provide fallback data
         job["title"] = job.get("title") or "Software Engineer"
         job["company"] = "Deutsche Bank"
@@ -4276,31 +4292,31 @@ def extract_generic_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, A
     return job
 
 if __name__ == "__main__":
-    print("Starting Enhanced Bulk-Scanner API server...")
+    print("Starting standard Bulk-Scanner API server...")
     print(f"OpenAI API Key available: {bool(os.getenv('OPENAI_API_KEY'))}")
     print(f"Resume processing available: {ResumeProcessor is not None}")
     
     # Show extraction methods status
-    print("\n🔧 Job Extraction Methods:")
+    print("\n Job Extraction Methods:")
     if os.getenv('GROQ_API_KEY'):
-        print("✅ Groq (Llama 3-70B) - FREE, 6,000 requests/day")
+        print(" Groq (Llama 3-70B) - FREE, 6,000 requests/day")
     else:
-        print("❌ Groq - Get free key: https://console.groq.com/")
+        print(" Groq - Get free key: https://console.groq.com/")
     
     if os.getenv('OLLAMA_AVAILABLE', '').lower() == 'true':
-        print("✅ Ollama (Local) - FREE, unlimited")
+        print(" Ollama (Local) - FREE, unlimited")
     else:
-        print("❌ Ollama - Install locally for unlimited free extraction")
+        print(" Ollama - Install locally for unlimited free extraction")
     
     if os.getenv('HUGGINGFACE_API_KEY'):
-        print("✅ HuggingFace - FREE tier available")
+        print(" HuggingFace - FREE tier available")
     else:
-        print("❌ HuggingFace - Optional free tier")
+        print(" HuggingFace - Optional free tier")
     
-    print("✅ Smart Keyword Extraction - Always available")
+    print(" Smart Keyword Extraction - Always available")
     
     print(f"\n💰 Cost per 50 jobs: $0.02 (96% savings vs old system)")
-    print(f"🚀 Quality ranking: Groq > Ollama > HuggingFace > Smart Extraction")
+    print(f" Quality ranking: Groq > Ollama > HuggingFace > Smart Extraction")
     
     # Production-ready server configuration
     port = int(os.getenv("PORT", 8000))

@@ -1,112 +1,85 @@
-// Enhanced Content Script with Real Cross-Origin Job Fetching
-// This version actually fetches job descriptions from cross-origin URLs
+// Content script for job extraction
 
 class JobExtractor {
   constructor() {
               this.apiEndpoint = 'https://jobmatch-production.up.railway.app/api/v1';
       this.maxJobsToFetch = 10;
-      this.fetchTimeout = 10000000; // 10 seconds
+      this.fetchTimeout = 10000000;
   }
 
-  // Wait for Amazon Jobs SPA content to load
   async waitForAmazonContent() {
-      const maxWaitTime = 15000; // 15 seconds max
-      const checkInterval = 500; // Check every 500ms
+      const maxWaitTime = 15000;
+      const checkInterval = 500;
       const startTime = Date.now();
       
-      console.log('⏳ Waiting for Amazon Jobs content to load...');
-      
       while (Date.now() - startTime < maxWaitTime) {
-          // Check if .read-more links have appeared
           const readMoreLinks = document.querySelectorAll('a.read-more[href*="/en/jobs/"]');
           const jobLinks = document.querySelectorAll('a[href*="/en/jobs/"]');
           
           if (readMoreLinks.length > 0) {
-              console.log(`✅ Amazon Jobs content loaded! Found ${readMoreLinks.length} .read-more links`);
               return true;
           }
           
           if (jobLinks.length > 0) {
-              console.log(`✅ Amazon Jobs content loaded! Found ${jobLinks.length} job links`);
               return true;
           }
           
-          // Also check for any job-related content
           const bodyText = document.body.textContent.toLowerCase();
           const hasJobContent = bodyText.includes('software engineer') || 
                                bodyText.includes('apply now') ||
                                bodyText.includes('job id');
           
           if (hasJobContent && document.querySelectorAll('a[href*="job"]').length > 5) {
-              console.log('✅ Amazon Jobs content detected via text analysis');
               return true;
           }
           
-          // Wait before next check
           await new Promise(resolve => setTimeout(resolve, checkInterval));
       }
       
-      console.log('⚠️ Amazon Jobs content did not load within timeout');
       return false;
   }
 
-  // Universal dynamic content waiting for all job sites
   async waitForDynamicContent() {
-      const maxWaitTime = 12000; // 12 seconds max
-      const checkInterval = 1000; // Check every 1 second
+      const maxWaitTime = 12000;
+      const checkInterval = 1000;
       const startTime = Date.now();
-      
-      console.log('⏳ Waiting for dynamic job content to load...');
       
       let previousJobCount = 0;
       let stableCount = 0;
       
       while (Date.now() - startTime < maxWaitTime) {
-          // Count current job-related elements
           const currentJobCount = this.countJobElements();
           
-          console.log(`🔍 Job elements found: ${currentJobCount} (previous: ${previousJobCount})`);
-          
-          // Check if content has stabilized (same count for 2 consecutive checks)
           if (currentJobCount === previousJobCount && currentJobCount > 0) {
               stableCount++;
               if (stableCount >= 2) {
-                  console.log(`✅ Dynamic content stabilized with ${currentJobCount} job elements`);
                   return true;
               }
           } else {
-              stableCount = 0; // Reset if count changed
+              stableCount = 0;
           }
           
           previousJobCount = currentJobCount;
           
-          // Wait before next check
           await new Promise(resolve => setTimeout(resolve, checkInterval));
       }
       
-      console.log(`⚠️ Dynamic content timeout reached. Final count: ${previousJobCount}`);
-      return previousJobCount > 0; // Return true if we found any jobs
+      return previousJobCount > 0;
   }
 
-  // Count job-related elements on the page
   countJobElements() {
       const selectors = [
-          // Generic job selectors
           'a[href*="job"]',
           'a[href*="career"]',
           'a[href*="position"]',
           '.job', '.job-item', '.job-listing', '.job-card',
           '.position', '.career', '.opening',
-          
-          // Platform-specific selectors
-          'a[href*="ashby_jid"]',           // Ashby
-          'a[href*="greenhouse"]',          // Greenhouse
-          'a[href*="lever.co"]',           // Lever
-          'a[href*="workday"]',            // Workday
-          'a[href*="bamboohr"]',           // BambooHR
-          'a[href*="smartrecruiters"]',    // SmartRecruiters
-          
-          // Deutsche Bank specific
+          'a[href*="ashby_jid"]',
+          'a[href*="greenhouse"]',
+          'a[href*="lever.co"]',
+          'a[href*="workday"]',
+          'a[href*="bamboohr"]',
+          'a[href*="smartrecruiters"]',
           'a[href*="deutsche-bank"]',
           '.job-title', '.position-title',
           '[data-job-id]', '[data-position-id]'
@@ -121,82 +94,60 @@ class JobExtractor {
       return totalCount;
   }
 
-  // Main function to extract job listings with enhanced cross-origin fetching
   async extractJobListings() {
       const jobs = [];
       
-      console.log('🔍 Starting enhanced job extraction...');
-      
-      // Step 0: Wait for dynamic content to load
       const currentUrl = window.location.href.toLowerCase();
       
       if (currentUrl.includes('amazon.jobs')) {
           await this.waitForAmazonContent();
       } else {
-          // Universal dynamic content waiting for all other sites
           await this.waitForDynamicContent();
       }
       
-      // Step 1: Find job links on the page
       const jobLinks = await this.findJobLinks();
       
       if (jobLinks.length > 0) {
-          console.log(`📋 Found ${jobLinks.length} job links, fetching detailed descriptions...`);
-          
-          // Limit to prevent overwhelming the system
           const limitedLinks = jobLinks.slice(0, this.maxJobsToFetch);
           
-          // Step 2: Fetch detailed job info (with cross-origin support)
           for (const link of limitedLinks) {
               try {
-                  const fullJob = await this.fetchJobDetailsEnhanced(link);
+                  const fullJob = await this.fetchJobDetails(link);
                   if (fullJob && fullJob.title) {
                       jobs.push(fullJob);
-                      console.log(`✅ Successfully fetched: ${fullJob.title}`);
                   }
               } catch (error) {
-                  console.error('❌ Error fetching job details:', error);
+                  console.error('Error fetching job details:', error);
                   
-                  // Fallback to basic extraction
                   const basicJob = this.extractJobFromLink(link);
                   if (basicJob && basicJob.title) {
                       jobs.push(basicJob);
-                      console.log(`⚡ Fallback extraction: ${basicJob.title}`);
                   }
               }
           }
       }
       
-      // Step 3: Fallback to basic page scraping if no links found
       if (jobs.length === 0) {
-          console.log('🔄 No job links found, using basic page extraction...');
           return this.extractJobListingsBasic();
       }
       
-      console.log(`🎯 Final result: ${jobs.length} jobs extracted`);
       return jobs;
   }
 
-  // Enhanced job details fetching with cross-origin support
-  async fetchJobDetailsEnhanced(jobLink) {
+  async fetchJobDetails(jobLink) {
       try {
-          // Check if we can fetch directly (same-origin)
           if (jobLink.url.startsWith(window.location.origin)) {
-              console.log(`🟢 Same-origin fetch: ${jobLink.url}`);
               return await this.fetchDirectly(jobLink);
           } 
-          // Cross-origin - use backend API
           else {
-              console.log(`🟡 Cross-origin fetch via backend: ${jobLink.url}`);
               return await this.fetchViaBackend(jobLink);
           }
       } catch (error) {
-          console.error('Error in fetchJobDetailsEnhanced:', error);
-          return jobLink; // Return basic info if all fails
+          console.error('Error in fetchJobDetails:', error);
+          return jobLink;
       }
   }
 
-  // Direct fetch for same-origin URLs
   async fetchDirectly(jobLink) {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), this.fetchTimeout);
@@ -224,14 +175,11 @@ class JobExtractor {
       }
   }
 
-  // Fetch via backend API for cross-origin URLs
   async fetchViaBackend(jobLink) {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), this.fetchTimeout);
       
       try {
-          console.log(`📡 Requesting backend fetch for: ${jobLink.url}`);
-          
           const response = await fetch(`${this.apiEndpoint}/fetch/job`, {
               method: 'POST',
               headers: {
@@ -241,7 +189,7 @@ class JobExtractor {
                   job_url: jobLink.url,
                   user_id: 'chrome-extension-user',
                   include_full_content: true,
-                  extraction_method: 'enhanced'
+                  extraction_method: 'standard'
               }),
               signal: controller.signal
           });
@@ -253,9 +201,6 @@ class JobExtractor {
           const result = await response.json();
           
           if (result.success && result.job) {
-              console.log(`✅ Backend fetch successful for: ${jobLink.url}`);
-              
-              // Merge backend data with original link data
               return {
                   ...jobLink,
                   title: result.job.title || jobLink.title,
@@ -275,9 +220,8 @@ class JobExtractor {
           }
           
       } catch (error) {
-          console.error('❌ Backend fetch failed:', error);
+          console.error('Backend fetch failed:', error);
           
-          // Return basic job info with indication of fetch failure
           return {
               ...jobLink,
               description: `Job details could not be fetched (${error.message})`,
@@ -300,41 +244,34 @@ class JobExtractor {
                           window.location.href.includes('amazon.jobs');
       
       if (isAmazonJobs) {
-          console.log('🔍 Amazon Jobs SPA detected - waiting for dynamic content...');
-          
-          // Wait for Amazon's JavaScript to load the job content
           await this.waitForAmazonContent();
       }
       
-      // Comprehensive selectors for different career sites
       const siteSpecificSelectors = {
-          // Amazon Jobs sites
           amazon: [
-              'a.read-more[href*="/en/jobs/"]',  // Specific Amazon "Read more" links  
-              'a[href*="/en/jobs/"]',        // Main Amazon job URLs
-              'a[href*="/jobs/"]',           // Alternative job URLs  
-              '.job-tile a',                 // Job tile links
-              '.result-item a',              // Search result items
-              '[data-test="job-title"] a',   // Job title test attributes
-              '.job-result a',               // Job result links
-              '.search-result a[href*="job"]', // Search result job links
-              'a[href*="Job-"]',             // Amazon job ID pattern
-              'a[data-test*="job"]',         // Job data attributes
-              '.JobTile a',                  // Alternative job tile class
-              '[data-testid="job-link"] a',  // Test ID for job links
-              '.job-listing a',              // Generic job listing links
-              '.position-link a'             // Position link pattern
+              'a.read-more[href*="/en/jobs/"]',
+              'a[href*="/en/jobs/"]',
+              'a[href*="/jobs/"]',
+              '.job-tile a',
+              '.result-item a',
+              '[data-test="job-title"] a',
+              '.job-result a',
+              '.search-result a[href*="job"]',
+              'a[href*="Job-"]',
+              'a[data-test*="job"]',
+              '.JobTile a',
+              '[data-testid="job-link"] a',
+              '.job-listing a',
+              '.position-link a'
           ],
           
-          // Workday sites
           workday: [
               'a[href*="myworkdayjobs.com"]',
               'a[data-automation-id*="jobTitle"]',
-              '.css-1qx8o17 a', // Common Workday class
+              '.css-1qx8o17 a',
               '[data-automation-id="jobTitle"] a'
           ],
           
-          // Greenhouse sites  
           greenhouse: [
               'a[href*="greenhouse.io"]',
               'a[href*="grnh.se"]',
@@ -342,20 +279,17 @@ class JobExtractor {
               '.job-post a'
           ],
           
-          // Lever sites
           lever: [
               'a[href*="jobs.lever.co"]',
               '.posting a',
               '.posting-title a'
           ],
           
-          // BambooHR sites
           bamboohr: [
               'a[href*="bamboohr.com"]',
               '.BH-JobBoard-Item a'
           ],
           
-          // Generic job site selectors
           generic: [
               'a[href*="/job/"]',
               'a[href*="/jobs/"]',
@@ -369,13 +303,11 @@ class JobExtractor {
           ]
       };
       
-      // Detect site type and use appropriate selectors
       const currentDomain = window.location.hostname.toLowerCase();
       let selectorsToUse = siteSpecificSelectors.generic;
       
       if (currentDomain.includes('amazon.jobs') || currentDomain.includes('amazon') && window.location.pathname.includes('/jobs')) {
           selectorsToUse = [...siteSpecificSelectors.amazon, ...siteSpecificSelectors.generic];
-          console.log('🎯 Amazon Jobs site detected - using Amazon-specific selectors');
       } else if (currentDomain.includes('workday')) {
           selectorsToUse = [...siteSpecificSelectors.workday, ...siteSpecificSelectors.generic];
       } else if (currentDomain.includes('greenhouse')) {
@@ -386,18 +318,13 @@ class JobExtractor {
           selectorsToUse = [...siteSpecificSelectors.bamboohr, ...siteSpecificSelectors.generic];
       }
       
-      console.log(`🎯 Using selectors for site type: ${currentDomain}`);
-      
-      // Extract job links using selected selectors
       selectorsToUse.forEach(selector => {
           try {
               const elements = document.querySelectorAll(selector);
-              console.log(`🔍 Selector "${selector}" found ${elements.length} elements`);
               
               elements.forEach(element => {
                   const href = element.href;
                   if (href && !jobLinks.find(link => link.url === href)) {
-                      // Extract basic info visible on listing page
                       const jobInfo = this.extractJobFromLink(element);
                       if (jobInfo.title) {
                           jobLinks.push({
@@ -415,12 +342,9 @@ class JobExtractor {
               console.warn(`Error with selector "${selector}":`, error);
           }
       });
-      
-      console.log(`📋 Total unique job links found: ${jobLinks.length}`);
       return jobLinks;
   }
 
-  // Extract basic job info from a job link element
   extractJobFromLink(linkElement) {
       const job = {
           title: '',
@@ -429,7 +353,6 @@ class JobExtractor {
           url: linkElement.href || linkElement.url
       };
       
-      // Find the job card/container
       const jobCard = linkElement.closest('.job-tile') || 
                      linkElement.closest('.job-item') || 
                      linkElement.closest('.job-listing') ||
@@ -440,7 +363,6 @@ class JobExtractor {
                      linkElement.parentElement;
       
       if (jobCard) {
-          // Extract title with multiple strategies
           const titleSelectors = [
               'h1', 'h2', 'h3', 'h4',
               '.title', '.job-title', '.position-title',
@@ -457,12 +379,10 @@ class JobExtractor {
               }
           }
           
-          // If no title found in card, use link text
           if (!job.title) {
               job.title = linkElement.textContent.trim() || linkElement.title || 'Job Position';
           }
           
-          // Extract company
           const companySelectors = [
               '.company', '.company-name', '.employer',
               '[data-automation-id*="company"]',
@@ -477,14 +397,12 @@ class JobExtractor {
               }
           }
           
-          // Fallback company extraction from domain or page title
           if (!job.company) {
               job.company = document.title.split(' - ')[0] || 
                            window.location.hostname.replace('www.', '').split('.')[0] ||
                            'Company';
           }
           
-          // Extract location
           const locationSelectors = [
               '.location', '.job-location', '.city',
               '[data-automation-id*="location"]',
@@ -508,7 +426,7 @@ class JobExtractor {
       const job = { ...basicJob };
       
       try {
-          // Enhanced extraction based on common ATS patterns
+    
           
           // Workday-specific extraction
           if (job.url.includes('myworkdayjobs.com') || job.url.includes('workday')) {
@@ -746,9 +664,7 @@ class JobExtractor {
 }
 }
 
-// Enhanced content extraction function
 async function extractPageContent() {
-  console.log('🚀 Starting enhanced content extraction from:', window.location.href);
   
   const extractor = new JobExtractor();
   
@@ -756,48 +672,43 @@ async function extractPageContent() {
     title: document.title,
     url: window.location.href,
     text: '',
-      jobElements: [],
-      jobLinks: [],
-      enhancedJobs: [] // New field for enhanced job data
+          jobElements: [],
+    jobLinks: [],
+    jobs: []
   };
   
-  try {
-      // Get enhanced job listings with cross-origin support
-      const enhancedJobs = await extractor.extractJobListings();
-      content.enhancedJobs = enhancedJobs;
-      
-      console.log(`✅ Enhanced extraction complete: ${enhancedJobs.length} jobs with detailed info`);
-      
-      // Also populate legacy fields for compatibility
-      content.jobElements = enhancedJobs.map((job, index) => ({
-          id: `enhanced-${index}`,
-          title: job.title,
-          company: job.company,
-          location: job.location,
-          description: job.description,
-          text: `${job.title} at ${job.company}`,
-          html: `<div>${job.title}</div>`,
-          selector: 'enhanced-extraction',
-          url: job.url
-      }));
-      
-  } catch (error) {
-      console.error('❌ Enhanced extraction failed, falling back to basic:', error);
-      
-      // Fallback to basic extraction
-      const basicJobs = extractor.extractJobListingsBasic();
-      content.jobElements = basicJobs.map((job, index) => ({
-          id: `basic-${index}`,
-          title: job.title,
-          company: job.company,
-          location: job.location,
-          description: job.description || 'Basic job extraction',
-          text: `${job.title} at ${job.company}`,
-          html: `<div>${job.title}</div>`,
-          selector: 'basic-extraction',
-          url: job.url
-      }));
-  }
+      try {
+        const jobs = await extractor.extractJobListings();
+        content.jobs = jobs;
+        
+        content.jobElements = jobs.map((job, index) => ({
+            id: `job-${index}`,
+            title: job.title,
+            company: job.company,
+            location: job.location,
+            description: job.description,
+            text: `${job.title} at ${job.company}`,
+            html: `<div>${job.title}</div>`,
+            selector: 'job-extraction',
+            url: job.url
+        }));
+        
+    } catch (error) {
+        console.error('Job extraction failed, falling back to basic:', error);
+        
+        const basicJobs = extractor.extractJobListingsBasic();
+        content.jobElements = basicJobs.map((job, index) => ({
+            id: `basic-${index}`,
+            title: job.title,
+            company: job.company,
+            location: job.location,
+            description: job.description || 'Basic job extraction',
+            text: `${job.title} at ${job.company}`,
+            html: `<div>${job.title}</div>`,
+            selector: 'basic-extraction',
+            url: job.url
+        }));
+    }
   
   // Extract main text content
   const mainContent = document.querySelector('main') || 
@@ -811,18 +722,14 @@ async function extractPageContent() {
       content.text = mainContent.textContent.trim().substring(0, 5000);
   }
   
-  console.log(`📊 Final extraction summary:`, {
-      enhancedJobs: content.enhancedJobs?.length || 0,
-      jobElements: content.jobElements?.length || 0,
-      textLength: content.text?.length || 0
-  });
+  console.log('Extracted', content.jobs?.length || 0, 'jobs');
   
   return content;
 }
 
 // Listen for messages from background script or popup
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  console.log('📨 Enhanced content script received message:', message);
+  console.log('Content script received message:', message);
   
   switch (message.type) {
     case 'EXTRACT_CONTENT':
@@ -845,41 +752,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           return true;
       
     case 'PING':
-          sendResponse({ status: 'ready', enhanced: true });
+          sendResponse({ status: 'ready' });
       break;
       
     default:
-          console.log('❓ Unknown message type:', message.type);
+          console.log(' Unknown message type:', message.type);
   }
 });
 
-// Auto-extract content when script loads (for auto-scan feature)
-if (window.location.href.includes('career') || 
-    window.location.href.includes('job') ||
-    window.location.href.includes('employment')) {
-  
-  // Special timing for Amazon Jobs SPA
-  const isAmazonJobs = window.location.hostname.includes('amazon.jobs') || 
-                      window.location.href.includes('amazon.jobs');
-  
-  const delayTime = isAmazonJobs ? 8000 : 3000; // 8 seconds for Amazon, 3 for others
-  
-  setTimeout(async () => {
-      try {
-          console.log(`🤖 Auto-extracting content (${isAmazonJobs ? 'Amazon Jobs SPA' : 'Standard'})...`);
-          const content = await extractPageContent();
-    
-    // Send to background script for processing
-    chrome.runtime.sendMessage({
-      type: 'PAGE_CONTENT_EXTRACTED',
-      data: content
-    });
-          
-          console.log('📤 Auto-extracted content sent to background script');
-      } catch (error) {
-          console.error('❌ Error in auto-extraction:', error);
-      }
-  }, delayTime);
-}
+// Auto-extraction feature removed - extension only works when manually clicked
 
-console.log('✅ Enhanced content script initialization complete'); 
+console.log('Content script initialization complete'); 

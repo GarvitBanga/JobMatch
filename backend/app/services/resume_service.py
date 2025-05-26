@@ -1,5 +1,5 @@
 """
-Enhanced Resume Processing Service with LLM Career Intelligence
+Resume Processing Service
 Handles PDF parsing, text extraction, resume structuring, and career insights generation
 """
 import logging
@@ -31,21 +31,21 @@ from openai import OpenAI
 logger = logging.getLogger(__name__)
 
 class ResumeProcessor:
-    """Enhanced processor with LLM-powered career intelligence"""
+    """Resume processor with career intelligence"""
     
     def __init__(self, openai_api_key: Optional[str] = None):
         self.openai_client = OpenAI(api_key=openai_api_key) if openai_api_key else None
         
     async def process_resume_file(self, file_content: bytes, filename: str) -> Dict[str, Any]:
         """
-        Enhanced resume processing with career intelligence
+        Resume processing with career intelligence
         
         Args:
             file_content: Raw file bytes
             filename: Original filename with extension
             
         Returns:
-            Enhanced resume data with career insights
+            Resume data with career insights
         """
         try:
             # Extract text based on file type
@@ -203,15 +203,15 @@ class ResumeProcessor:
             )
             
             json_str = response.choices[0].message.content
-            logger.info(f"🔍 OPENAI RAW RESPONSE: '{json_str}'")
-            logger.info(f"🔍 RESPONSE TYPE: {type(json_str)}")
-            logger.info(f"🔍 RESPONSE LENGTH: {len(json_str) if json_str else 0}")
+            logger.info(f" OPENAI RAW RESPONSE: '{json_str}'")
+            logger.info(f" RESPONSE TYPE: {type(json_str)}")
+            logger.info(f" RESPONSE LENGTH: {len(json_str) if json_str else 0}")
             
             if not json_str or json_str.strip() == "":
                 logger.error("OpenAI returned empty response")
                 raise ValueError("Empty response from OpenAI")
             
-            # 🚀 FIX: Strip markdown code block wrapper if present
+            # Strip markdown code block wrapper if present
             json_str = json_str.strip()
             if json_str.startswith("```json"):
                 json_str = json_str[7:]  # Remove ```json
@@ -221,7 +221,7 @@ class ResumeProcessor:
                 json_str = json_str[:-3]  # Remove trailing ```
             json_str = json_str.strip()
             
-            logger.info(f"🔍 CLEANED JSON: '{json_str[:200]}...'")
+            logger.info(f" CLEANED JSON: '{json_str[:200]}...'")
             
             return json.loads(json_str)
             
@@ -323,15 +323,15 @@ class ResumeProcessor:
             )
             
             raw_content = response.choices[0].message.content
-            logger.info(f"🔍 CAREER INSIGHTS RAW RESPONSE: '{raw_content}'")
-            logger.info(f"🔍 CAREER RESPONSE TYPE: {type(raw_content)}")
-            logger.info(f"🔍 CAREER RESPONSE LENGTH: {len(raw_content) if raw_content else 0}")
+            logger.info(f" CAREER INSIGHTS RAW RESPONSE: '{raw_content}'")
+            logger.info(f" CAREER RESPONSE TYPE: {type(raw_content)}")
+            logger.info(f" CAREER RESPONSE LENGTH: {len(raw_content) if raw_content else 0}")
             
             if not raw_content or raw_content.strip() == "":
                 logger.error("OpenAI returned empty career insights response")
                 raise ValueError("Empty career insights response from OpenAI")
             
-            # 🚀 FIX: Strip markdown code block wrapper if present
+            # Strip markdown code block wrapper if present
             raw_content = raw_content.strip()
             if raw_content.startswith("```json"):
                 raw_content = raw_content[7:]  # Remove ```json
@@ -341,7 +341,7 @@ class ResumeProcessor:
                 raw_content = raw_content[:-3]  # Remove trailing ```
             raw_content = raw_content.strip()
             
-            logger.info(f"🔍 CLEANED CAREER JSON: '{raw_content[:200]}...'")
+            logger.info(f" CLEANED CAREER JSON: '{raw_content[:200]}...'")
             
             insights = json.loads(raw_content)
             

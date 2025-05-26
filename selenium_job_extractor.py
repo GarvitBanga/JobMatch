@@ -70,12 +70,12 @@ class SeleniumJobExtractor:
             return basic_job
         
         try:
-            logger.info(f"🚀 Selenium: Fetching {job_url}")
+            logger.info(f" Selenium: Fetching {job_url}")
             
             # Navigate to job page
             self.driver.get(job_url)
             
-            # 🚀 GENERALIZED WAITING: Wait for dynamic content to load (5-10 seconds)
+            # Wait for dynamic content to load (5-10 seconds)
             logger.info("⏳ Waiting for dynamic content to load...")
             
             # Wait for initial page load
@@ -181,7 +181,7 @@ class SeleniumJobExtractor:
                     title_element = self.driver.find_element(By.CSS_SELECTOR, selector)
                     if title_element and title_element.text.strip():
                         job_data["title"] = title_element.text.strip()
-                        logger.info(f"📋 Found title: {job_data['title']}")
+                        logger.info(f" Found title: {job_data['title']}")
                         break
                 except NoSuchElementException:
                     continue
@@ -430,7 +430,7 @@ class SeleniumJobExtractor:
                     title_element = self.driver.find_element(By.CSS_SELECTOR, selector)
                     if title_element and title_element.text.strip():
                         job_data["title"] = title_element.text.strip()
-                        logger.info(f"📋 Found title: {job_data['title']}")
+                        logger.info(f" Found title: {job_data['title']}")
                         break
                 except NoSuchElementException:
                     continue
@@ -576,7 +576,7 @@ class SeleniumJobExtractor:
                     title_element = self.driver.find_element(By.CSS_SELECTOR, selector)
                     if title_element and title_element.text.strip():
                         job_data["title"] = title_element.text.strip()
-                        logger.info(f"📋 Found title: {job_data['title']}")
+                        logger.info(f" Found title: {job_data['title']}")
                         break
                 except NoSuchElementException:
                     continue
@@ -645,7 +645,7 @@ class SeleniumJobExtractor:
         }
         
         try:
-            logger.info("🎯 Amazon Jobs extraction with Selenium...")
+            logger.info(" Amazon Jobs extraction with Selenium...")
             
             # Amazon Jobs is a complex SPA, need to wait for content to load
             time.sleep(3)  # Initial wait for SPA initialization
@@ -654,7 +654,7 @@ class SeleniumJobExtractor:
             is_search_page = '/search' in job_url
             
             if is_search_page:
-                logger.info("📋 Detected Amazon Jobs search page - extracting job listings")
+                logger.info(" Detected Amazon Jobs search page - extracting job listings")
                 return self.extract_amazon_search_results(job_url, basic_job)
             else:
                 logger.info("📄 Detected individual Amazon job page - extracting job details")
@@ -854,7 +854,7 @@ class SeleniumJobExtractor:
                     title_element = self.driver.find_element(By.CSS_SELECTOR, selector)
                     if title_element and title_element.text.strip():
                         job_data["title"] = title_element.text.strip()
-                        logger.info(f"📋 Found title: {job_data['title']}")
+                        logger.info(f" Found title: {job_data['title']}")
                         break
                 except NoSuchElementException:
                     continue
@@ -947,5 +947,5 @@ if __name__ == "__main__":
     
     result = fetch_job_selenium_implementation(test_url, test_job)
     print(f"✅ Extracted: {len(result.get('description', ''))} characters")
-    print(f"📋 Title: {result.get('title', 'N/A')}")
+    print(f" Title: {result.get('title', 'N/A')}")
     print(f"📄 Description preview: {result.get('description', '')[:200]}...") 

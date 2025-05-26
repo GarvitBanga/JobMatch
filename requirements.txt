@@ -20,6 +20,7 @@ selenium>=4.15.0
 # Basic document parsing (without textract conflicts)
 python-docx==1.1.0
 PyPDF2==3.0.1
+pdfplumber==0.10.3
 python-multipart==0.0.6
 
 # Environment & Config

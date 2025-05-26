@@ -1,8 +1,10 @@
 {
   "manifest_version": 3,
-  "name": "Bulk-Scanner Résumé Matcher",
+  "name": "JobMatch - AI Resume Matcher",
   "version": "1.0.0",
-  "description": "Scans company career sites, matches job descriptions against your résumé, and surfaces top roles with relevance scores.",
+  "description": "AI-powered job scanner that matches your resume against job postings on career sites. Get relevance scores and find your perfect role faster.",
+  "author": "JobMatch Team",
+  "homepage_url": "https://github.com/yourusername/jobmatch",
   "permissions": [
     "activeTab",
     "storage",
@@ -10,9 +12,7 @@
   ],
   "host_permissions": [
     "https://*/*",
-    "http://*/*",
-    "https://jobmatch-production.up.railway.app/*",
-    "http://127.0.0.1:8000/*"
+    "https://jobmatch-production.up.railway.app/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -26,7 +26,7 @@
   ],
   "action": {
     "default_popup": "index.html",
-    "default_title": "Bulk-Scanner Résumé Matcher",
+    "default_title": "JobMatch - AI Resume Matcher",
     "default_icon": {
       "16": "logo192.png",
       "48": "logo192.png",
