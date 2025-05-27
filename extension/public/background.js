@@ -67,8 +67,9 @@ async function handleScanPage(data, sendResponse) {
       'matchThreshold'
     ]);
     
-    // Use fixed production API endpoint
+    // Use fixed production API endpoint with security
     const apiEndpoint = 'https://jobmatch-production.up.railway.app/api/v1';
+    const apiKey = 'ext_jobmatch_secure_key_2024';  // Must match server config
     
     console.log('API endpoint:', apiEndpoint);
     console.log('Scanning page:', url);
@@ -128,6 +129,8 @@ async function handleScanPage(data, sendResponse) {
         headers: {
           'Content-Type': 'application/json',
           'Accept': 'application/json',
+          'X-JobMatch-API-Key': apiKey,
+          'X-Extension-ID': chrome.runtime.id
         },
         body: JSON.stringify(requestData),
         signal: controller.signal

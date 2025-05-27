@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
+from functools import wraps
 import uvicorn
 import os
 import logging
@@ -100,6 +101,88 @@ class RateLimiter:
 # Global rate limiter instance
 rate_limiter = RateLimiter()
 
+# Security Configuration
+EXTENSION_SECURITY_CONFIG = {
+    "allowed_extension_ids": [
+        # Add your actual extension ID here after getting it from chrome://extensions/
+        "chrome-extension-id-placeholder"
+    ],
+    "validate_origin": True,
+    "validate_user_agent": True
+}
+
+API_KEY_CONFIG = {
+    "require_api_key": True,
+    "extension_api_key": os.getenv("EXTENSION_API_KEY", "ext_jobmatch_secure_key_2024"),
+    "header_name": "X-JobMatch-API-Key"
+}
+
+def validate_extension_request(request):
+    """Validate that request comes from authorized extension"""
+    
+    # Check Origin header
+    origin = request.headers.get("origin", "")
+    if not origin.startswith("chrome-extension://") and not origin.startswith("moz-extension://"):
+        return False, "Invalid origin - must be from browser extension"
+    
+    # Check User-Agent for extension patterns
+    user_agent = request.headers.get("user-agent", "")
+    if "Chrome" not in user_agent and "Firefox" not in user_agent:
+        return False, "Invalid user agent - must be from supported browser"
+    
+    # Check for extension ID in headers (if implemented)
+    extension_id = request.headers.get("X-Extension-ID", "")
+    if extension_id and extension_id not in EXTENSION_SECURITY_CONFIG["allowed_extension_ids"]:
+        return False, "Unauthorized extension ID"
+    
+    return True, "Valid extension request"
+
+def validate_api_key(request):
+    """Validate API key for extension requests"""
+    api_key = request.headers.get(API_KEY_CONFIG["header_name"], "")
+    
+    if not api_key:
+        return False, "Missing API key header"
+    
+    if api_key != API_KEY_CONFIG["extension_api_key"]:
+        return False, "Invalid API key"
+    
+    return True, "Valid API key"
+
+def require_extension_auth(func):
+    """Security decorator for API endpoints"""
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        # Find the request object in the arguments
+        request = None
+        for arg in args:
+            if isinstance(arg, Request):
+                request = arg
+                break
+        
+        if not request:
+            # Look in kwargs
+            request = kwargs.get('request') or kwargs.get('http_request')
+        
+        if not request:
+            raise HTTPException(status_code=500, detail="Internal error: Request object not found")
+        
+        # Validate extension request
+        is_valid, message = validate_extension_request(request)
+        if not is_valid:
+            logger.warning(f"Extension validation failed: {message} - Origin: {request.headers.get('origin', 'None')}")
+            raise HTTPException(status_code=403, detail=f"Forbidden: {message}")
+        
+        # Validate API key (if enabled)
+        if API_KEY_CONFIG["require_api_key"]:
+            is_valid_key, key_message = validate_api_key(request)
+            if not is_valid_key:
+                logger.warning(f"API key validation failed: {key_message}")
+                raise HTTPException(status_code=401, detail=f"Unauthorized: {key_message}")
+        
+        return await func(*args, **kwargs)
+    return wrapper
+
 # Import our resume processing services
 try:
     # Try multiple import paths for different deployment environments
@@ -133,13 +216,17 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-# Add CORS middleware for Chrome Extensions
+# Add CORS middleware for Chrome Extensions (Secure Configuration)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for Chrome extensions
-    allow_credentials=False,  # Must be False when allow_origins=["*"]
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH"],
-    allow_headers=["*"],
+    allow_origins=[
+        "chrome-extension://*",  # Allow any Chrome extension for now
+        "moz-extension://*",     # Allow any Firefox extension for now
+        # TODO: Replace with specific extension ID after deployment
+    ],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "X-JobMatch-API-Key", "X-Extension-ID"],
     expose_headers=["*"],
 )
 
@@ -327,7 +414,9 @@ async def get_user_usage(user_id: str, request: Request):
         raise HTTPException(status_code=500, detail=f"Error getting usage: {str(e)}")
 
 @app.post("/api/v1/upload/resume")
+@require_extension_auth
 async def upload_resume(
+    request: Request,
     file: UploadFile = File(...),
     user_id: str = "default"
 ):
@@ -393,6 +482,7 @@ async def upload_resume(
         raise HTTPException(status_code=500, detail=f"Resume processing failed: {str(e)}")
 
 @app.post("/api/v1/scan/page", response_model=ScanPageResponse)
+@require_extension_auth
 async def scan_page_with_resume(request: ScanPageRequest, http_request: Request):
     """
     Scan endpoint that supports both individual and batch processing
@@ -1369,7 +1459,9 @@ def get_mock_job_matches(url: str) -> List[Dict[str, Any]]:
     ]
 
 @app.post("/api/v1/fetch/job")
+@require_extension_auth
 async def fetch_job_details(
+    http_request: Request,
     request: Dict[str, Any]
 ):
     """
@@ -2326,7 +2418,8 @@ def detect_site_type(url: str) -> str:
         return 'generic'
 
 @app.post("/api/v1/match/batch", response_model=ScanPageResponse)
-async def batch_job_matching(request: BatchJobMatchRequest):
+@require_extension_auth
+async def batch_job_matching(request: BatchJobMatchRequest, http_request: Request):
     """
     🎯 FIXED: Batch job matching endpoint that PRIORITIZES OpenAI scoring over similarity
     Ensures consistent, realistic match scores from OpenAI rather than inflated similarity scores

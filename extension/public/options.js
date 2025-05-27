@@ -88,12 +88,18 @@ async function resetSettings() {
 async function testConnection() {
     try {
         const apiEndpoint = 'https://jobmatch-production.up.railway.app/api/v1';
+        const apiKey = 'ext_jobmatch_secure_key_2024';  // Must match server config
         
         showStatus('Testing connection...', 'info');
         
         // Remove /api/v1 from endpoint for health check
         const baseUrl = apiEndpoint.replace('/api/v1', '');
-        const response = await fetch(`${baseUrl}/health`);
+        const response = await fetch(`${baseUrl}/health`, {
+            headers: {
+                'X-JobMatch-API-Key': apiKey,
+                'X-Extension-ID': chrome.runtime.id
+            }
+        });
         
         if (response.ok) {
             const data = await response.json();
@@ -127,6 +133,7 @@ async function handleResumeUpload(event) {
         }
         
         const apiEndpoint = 'https://jobmatch-production.up.railway.app/api/v1';
+        const apiKey = 'ext_jobmatch_secure_key_2024';  // Must match server config
         
         const formData = new FormData();
         formData.append('file', file);
@@ -134,6 +141,10 @@ async function handleResumeUpload(event) {
         
         const response = await fetch(`${apiEndpoint}/upload/resume`, {
             method: 'POST',
+            headers: {
+                'X-JobMatch-API-Key': apiKey,
+                'X-Extension-ID': chrome.runtime.id
+            },
             body: formData
         });
         
