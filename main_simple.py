@@ -642,7 +642,7 @@ async def scan_page_with_resume(
             )
             
             # Call batch processing function directly
-            return await batch_job_matching(batch_request)
+            return await batch_job_matching(batch_request, http_request)
         
         # Fallback to original processing for smaller job sets or when batch is disabled
         logger.info("Using individual job processing")
