@@ -166,6 +166,23 @@ async def require_extension_auth(request: Request):
     
     return True
 
+def security_dependency(request: Request):
+    """Dependency that runs security check before parameter validation"""
+    # Validate extension request
+    is_valid, message = validate_extension_request(request)
+    if not is_valid:
+        logger.warning(f"Extension validation failed: {message} - Origin: {request.headers.get('origin', 'None')}")
+        raise HTTPException(status_code=403, detail=f"Forbidden: {message}")
+    
+    # Validate API key (if enabled)
+    if API_KEY_CONFIG["require_api_key"]:
+        is_valid_key, key_message = validate_api_key(request)
+        if not is_valid_key:
+            logger.warning(f"API key validation failed: {key_message}")
+            raise HTTPException(status_code=401, detail=f"Unauthorized: {key_message}")
+    
+    return request
+
 # Import our resume processing services
 try:
     # Try multiple import paths for different deployment environments
@@ -398,12 +415,10 @@ async def get_user_usage(user_id: str, request: Request):
 
 @app.post("/api/v1/upload/resume")
 async def upload_resume(
-    request: Request,
+    request: Request = Depends(security_dependency),
     file: UploadFile = File(...),
     user_id: str = "default"
 ):
-    # Security check
-    await require_extension_auth(request)
     """
     Upload and process a resume file (PDF, DOCX, TXT)
     Returns structured resume data
@@ -468,10 +483,8 @@ async def upload_resume(
 @app.post("/api/v1/scan/page", response_model=ScanPageResponse)
 async def scan_page_with_resume(
     request: ScanPageRequest, 
-    http_request: Request
+    http_request: Request = Depends(security_dependency)
 ):
-    # Security check
-    await require_extension_auth(http_request)
     
     """
     Scan endpoint that supports both individual and batch processing
@@ -1449,11 +1462,9 @@ def get_mock_job_matches(url: str) -> List[Dict[str, Any]]:
 
 @app.post("/api/v1/fetch/job")
 async def fetch_job_details(
-    http_request: Request,
-    request: Dict[str, Any]
+    request: Dict[str, Any],
+    http_request: Request = Depends(security_dependency)
 ):
-    # Security check
-    await require_extension_auth(http_request)
     
     """
     Job fetching for cross-origin sites (Workday, Greenhouse, Lever, etc.)
@@ -2411,10 +2422,8 @@ def detect_site_type(url: str) -> str:
 @app.post("/api/v1/match/batch", response_model=ScanPageResponse)
 async def batch_job_matching(
     request: BatchJobMatchRequest, 
-    http_request: Request
+    http_request: Request = Depends(security_dependency)
 ):
-    # Security check
-    await require_extension_auth(http_request)
     
     """
     🎯 FIXED: Batch job matching endpoint that PRIORITIZES OpenAI scoring over similarity
