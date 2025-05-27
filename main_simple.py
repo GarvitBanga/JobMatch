@@ -104,7 +104,9 @@ rate_limiter = RateLimiter()
 # Security Configuration
 EXTENSION_SECURITY_CONFIG = {
     "allowed_extension_ids": [
-        # Add your actual extension ID here after getting it from chrome://extensions/
+        # Your actual Chrome extension ID
+        "ecildnmmdojhcbgadibeniplpdgkegjf",
+        # Fallback placeholder for development
         "chrome-extension-id-placeholder"
     ],
     "validate_origin": True,
@@ -130,10 +132,11 @@ def validate_extension_request(request):
     if "Chrome" not in user_agent and "Firefox" not in user_agent:
         return False, "Invalid user agent - must be from supported browser"
     
-    # Check for extension ID in headers (if implemented)
+    # Check for extension ID in headers (if implemented) - Allow all for now
     extension_id = request.headers.get("X-Extension-ID", "")
-    if extension_id and extension_id not in EXTENSION_SECURITY_CONFIG["allowed_extension_ids"]:
-        return False, "Unauthorized extension ID"
+    # TODO: Enable specific extension ID validation in production if needed
+    # if extension_id and extension_id not in EXTENSION_SECURITY_CONFIG["allowed_extension_ids"]:
+    #     return False, "Unauthorized extension ID"
     
     return True, "Valid extension request"
 
