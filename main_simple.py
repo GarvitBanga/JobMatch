@@ -149,39 +149,22 @@ def validate_api_key(request):
     
     return True, "Valid API key"
 
-def require_extension_auth(func):
-    """Security decorator for API endpoints"""
-    @wraps(func)
-    async def wrapper(*args, **kwargs):
-        # Find the request object in the arguments
-        request = None
-        for arg in args:
-            if isinstance(arg, Request):
-                request = arg
-                break
-        
-        if not request:
-            # Look in kwargs
-            request = kwargs.get('request') or kwargs.get('http_request')
-        
-        if not request:
-            raise HTTPException(status_code=500, detail="Internal error: Request object not found")
-        
-        # Validate extension request
-        is_valid, message = validate_extension_request(request)
-        if not is_valid:
-            logger.warning(f"Extension validation failed: {message} - Origin: {request.headers.get('origin', 'None')}")
-            raise HTTPException(status_code=403, detail=f"Forbidden: {message}")
-        
-        # Validate API key (if enabled)
-        if API_KEY_CONFIG["require_api_key"]:
-            is_valid_key, key_message = validate_api_key(request)
-            if not is_valid_key:
-                logger.warning(f"API key validation failed: {key_message}")
-                raise HTTPException(status_code=401, detail=f"Unauthorized: {key_message}")
-        
-        return await func(*args, **kwargs)
-    return wrapper
+async def require_extension_auth(request: Request):
+    """Security validation function for API endpoints"""
+    # Validate extension request
+    is_valid, message = validate_extension_request(request)
+    if not is_valid:
+        logger.warning(f"Extension validation failed: {message} - Origin: {request.headers.get('origin', 'None')}")
+        raise HTTPException(status_code=403, detail=f"Forbidden: {message}")
+    
+    # Validate API key (if enabled)
+    if API_KEY_CONFIG["require_api_key"]:
+        is_valid_key, key_message = validate_api_key(request)
+        if not is_valid_key:
+            logger.warning(f"API key validation failed: {key_message}")
+            raise HTTPException(status_code=401, detail=f"Unauthorized: {key_message}")
+    
+    return True
 
 # Import our resume processing services
 try:
@@ -414,12 +397,13 @@ async def get_user_usage(user_id: str, request: Request):
         raise HTTPException(status_code=500, detail=f"Error getting usage: {str(e)}")
 
 @app.post("/api/v1/upload/resume")
-@require_extension_auth
 async def upload_resume(
     request: Request,
     file: UploadFile = File(...),
     user_id: str = "default"
 ):
+    # Security check
+    await require_extension_auth(request)
     """
     Upload and process a resume file (PDF, DOCX, TXT)
     Returns structured resume data
@@ -482,8 +466,13 @@ async def upload_resume(
         raise HTTPException(status_code=500, detail=f"Resume processing failed: {str(e)}")
 
 @app.post("/api/v1/scan/page", response_model=ScanPageResponse)
-@require_extension_auth
-async def scan_page_with_resume(request: ScanPageRequest, http_request: Request):
+async def scan_page_with_resume(
+    request: ScanPageRequest, 
+    http_request: Request
+):
+    # Security check
+    await require_extension_auth(http_request)
+    
     """
     Scan endpoint that supports both individual and batch processing
     """
@@ -1459,11 +1448,13 @@ def get_mock_job_matches(url: str) -> List[Dict[str, Any]]:
     ]
 
 @app.post("/api/v1/fetch/job")
-@require_extension_auth
 async def fetch_job_details(
     http_request: Request,
     request: Dict[str, Any]
 ):
+    # Security check
+    await require_extension_auth(http_request)
+    
     """
     Job fetching for cross-origin sites (Workday, Greenhouse, Lever, etc.)
     """
@@ -2418,8 +2409,13 @@ def detect_site_type(url: str) -> str:
         return 'generic'
 
 @app.post("/api/v1/match/batch", response_model=ScanPageResponse)
-@require_extension_auth
-async def batch_job_matching(request: BatchJobMatchRequest, http_request: Request):
+async def batch_job_matching(
+    request: BatchJobMatchRequest, 
+    http_request: Request
+):
+    # Security check
+    await require_extension_auth(http_request)
+    
     """
     🎯 FIXED: Batch job matching endpoint that PRIORITIZES OpenAI scoring over similarity
     Ensures consistent, realistic match scores from OpenAI rather than inflated similarity scores
