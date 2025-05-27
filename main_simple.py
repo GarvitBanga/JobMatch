@@ -5,7 +5,7 @@ FastAPI server for job matching and resume processing
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 from functools import wraps
@@ -216,6 +216,42 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+# Security middleware to check protected endpoints BEFORE parameter validation
+@app.middleware("http")
+async def security_middleware(request: Request, call_next):
+    # List of protected endpoints
+    protected_endpoints = [
+        "/api/v1/upload/resume",
+        "/api/v1/scan/page", 
+        "/api/v1/match/batch",
+        "/api/v1/fetch/job"
+    ]
+    
+    # Check if this is a protected endpoint
+    if request.url.path in protected_endpoints:
+        # Validate extension request
+        is_valid, message = validate_extension_request(request)
+        if not is_valid:
+            logger.warning(f"Extension validation failed: {message} - Origin: {request.headers.get('origin', 'None')}")
+            return JSONResponse(
+                status_code=403,
+                content={"detail": f"Forbidden: {message}"}
+            )
+        
+        # Validate API key (if enabled)
+        if API_KEY_CONFIG["require_api_key"]:
+            is_valid_key, key_message = validate_api_key(request)
+            if not is_valid_key:
+                logger.warning(f"API key validation failed: {key_message}")
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": f"Unauthorized: {key_message}"}
+                )
+    
+    # Continue to the endpoint
+    response = await call_next(request)
+    return response
+
 # Add CORS middleware for Chrome Extensions (Secure Configuration)
 app.add_middleware(
     CORSMiddleware,
@@ -415,7 +451,7 @@ async def get_user_usage(user_id: str, request: Request):
 
 @app.post("/api/v1/upload/resume")
 async def upload_resume(
-    request: Request = Depends(security_dependency),
+    request: Request,
     file: UploadFile = File(...),
     user_id: str = "default"
 ):
@@ -483,7 +519,7 @@ async def upload_resume(
 @app.post("/api/v1/scan/page", response_model=ScanPageResponse)
 async def scan_page_with_resume(
     request: ScanPageRequest, 
-    http_request: Request = Depends(security_dependency)
+    http_request: Request
 ):
     
     """
@@ -1462,8 +1498,8 @@ def get_mock_job_matches(url: str) -> List[Dict[str, Any]]:
 
 @app.post("/api/v1/fetch/job")
 async def fetch_job_details(
-    request: Dict[str, Any],
-    http_request: Request = Depends(security_dependency)
+    http_request: Request,
+    request: Dict[str, Any]
 ):
     
     """
@@ -2422,7 +2458,7 @@ def detect_site_type(url: str) -> str:
 @app.post("/api/v1/match/batch", response_model=ScanPageResponse)
 async def batch_job_matching(
     request: BatchJobMatchRequest, 
-    http_request: Request = Depends(security_dependency)
+    http_request: Request
 ):
     
     """
