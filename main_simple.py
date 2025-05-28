@@ -1,7 +1,4 @@
-#!/usr/bin/env python3
-"""
-FastAPI server for job matching and resume processing
-"""
+
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,7 +30,6 @@ class RateLimiter:
         self.openai_requests = defaultdict(list)  # Separate tracking for API calls
     
     def is_allowed(self, user_id: str, max_requests: int = 50, window_hours: int = 24) -> bool:
-        """Check if user is within general rate limit"""
         now = datetime.now()
         cutoff = now - timedelta(hours=window_hours)
         
@@ -52,7 +48,6 @@ class RateLimiter:
         return True
     
     def is_openai_allowed(self, user_id: str, max_openai_calls: int = 10, window_hours: int = 24) -> bool:
-        """Check if user is within API call limit"""
         now = datetime.now()
         cutoff = now - timedelta(hours=window_hours)
         
@@ -71,7 +66,6 @@ class RateLimiter:
         return True
     
     def get_usage_stats(self, user_id: str) -> Dict[str, Any]:
-        """Get current usage statistics for a user"""
         now = datetime.now()
         cutoff_24h = now - timedelta(hours=24)
         cutoff_1h = now - timedelta(hours=1)
@@ -93,7 +87,6 @@ class RateLimiter:
         }
     
     def record_openai_call(self, user_id: str) -> None:
-        """Record an API call for rate limiting purposes"""
         now = datetime.now()
         self.openai_requests[user_id].append(now)
         logger.info(f"Recorded API call for user {user_id}. Total today: {len(self.openai_requests[user_id])}")
@@ -120,7 +113,6 @@ API_KEY_CONFIG = {
 }
 
 def validate_extension_request(request):
-    """Validate that request comes from authorized extension"""
     
     # Check Origin header
     origin = request.headers.get("origin", "")
@@ -823,7 +815,7 @@ def extract_jobs_from_page_content(page_content: Dict[str, Any], url: str) -> Li
                     logger.info(f" Link {i+1}: href='{href}' title='{title}'")
                 
                 # Use our generic selectors on the Selenium-loaded content
-                logger.info("🔄 Applying job selectors to dynamic content...")
+                logger.info(" Applying job selectors to dynamic content...")
                 
                 # Generic job link selectors - same as in extract_generic_jobs_fallback
                 job_selectors = [
@@ -1080,7 +1072,7 @@ def fetch_job_with_fallback_strategies(job_url: str, basic_job: Dict[str, Any]) 
     """
     
     # Try strategies in order for all sites
-    logger.info(f"🔄 Using generalized extraction strategy for: {job_url}")
+    logger.info(f" Using generalized extraction strategy for: {job_url}")
     
     strategies = [
         ("static", fetch_job_static),     # Try static first (fastest)
@@ -1090,7 +1082,7 @@ def fetch_job_with_fallback_strategies(job_url: str, basic_job: Dict[str, Any]) 
     
     for strategy_name, strategy_func in strategies:
         try:
-            logger.info(f"🔄 Trying {strategy_name} for {job_url}")
+            logger.info(f" Trying {strategy_name} for {job_url}")
             result = strategy_func(job_url, basic_job)
             
             if result and result.get('description'):
@@ -1363,7 +1355,7 @@ def extract_generic_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, A
         
         # If extraction failed, try alternative approaches
         if not job.get("description") or len(job.get("description", "")) < 100:
-            logger.info("🔄 Primary extraction yielded minimal content, trying alternative methods")
+            logger.info(" Primary extraction yielded minimal content, trying alternative methods")
             
             # Try to extract from meta tags
             meta_desc = soup.find('meta', {'name': 'description'})
@@ -2315,7 +2307,7 @@ def extract_amazon_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, An
                 # Clean up location text
                 if 'location' not in location_text.lower():
                     job["location"] = location_text
-                    logger.info(f"📍 Found location: {location_text}")
+                    logger.info(f" Found location: {location_text}")
                     break
         
         # Extract location from description
@@ -2336,7 +2328,7 @@ def extract_amazon_job(soup: BeautifulSoup, job: Dict[str, Any]) -> Dict[str, An
                     location = matches[0].strip()
                     if len(location) > 2 and len(location) < 50:
                         job["location"] = location
-                        logger.info(f"📍 Extracted location from text: {location}")
+                        logger.info(f" Extracted location from text: {location}")
                 break
         
         # Use universal content extraction
@@ -2465,14 +2457,14 @@ async def batch_job_matching(
 ):
     
     """
-    🎯 FIXED: Batch job matching endpoint that PRIORITIZES OpenAI scoring over similarity
+     FIXED: Batch job matching endpoint that PRIORITIZES OpenAI scoring over similarity
     Ensures consistent, realistic match scores from OpenAI rather than inflated similarity scores
     """
     try:
         import time
         start_time = time.time()
         
-        logger.info(f"🔄 Batch matching {len(request.jobs)} jobs for user {request.user_id}")
+        logger.info(f" Batch matching {len(request.jobs)} jobs for user {request.user_id}")
         
         # Check OpenAI-specific rate limit
         user_identifier = f"{request.user_id}_batch"
@@ -2495,7 +2487,7 @@ async def batch_job_matching(
             
             if rate_limit_result:
                 logger.info(f" OpenAI rate limit check passed for {user_identifier}")
-                logger.info("🤖 Using OpenAI for realistic, accurate batch analysis")
+                logger.info(" Using OpenAI for realistic, accurate batch analysis")
                 
                 # Record the OpenAI call BEFORE making the request
                 rate_limiter.record_openai_call(user_identifier)
@@ -2691,7 +2683,7 @@ def create_concise_job_summary(job: Dict[str, Any]) -> Dict[str, Any]:
         job_summary['summary_description_length'] = len(job_summary['description'])
         job_summary['compression_ratio'] = f"{len(concise_description)/len(full_description)*100:.1f}%"
         
-        logger.info(f"📝 Compressed job '{title}': {len(full_description)} → {len(concise_description)} chars ({job_summary['compression_ratio']})")
+        logger.info(f" Compressed job '{title}': {len(full_description)} → {len(concise_description)} chars ({job_summary['compression_ratio']})")
         
         return job_summary
         
@@ -2701,7 +2693,7 @@ def create_concise_job_summary(job: Dict[str, Any]) -> Dict[str, Any]:
 
 async def batch_analyze_jobs_with_openai(jobs: List[Dict], resume_data: Dict, api_key: str) -> List[Dict]:
     """
-    🎯 FIXED: Analyze all jobs in a single OpenAI API call for consistent, accurate scoring
+     FIXED: Analyze all jobs in a single OpenAI API call for consistent, accurate scoring
     Now prioritizes OpenAI's match scores over inflated similarity matching
     """
     try:
@@ -2710,7 +2702,7 @@ async def batch_analyze_jobs_with_openai(jobs: List[Dict], resume_data: Dict, ap
         
         client = OpenAI(api_key=api_key)
         
-        # logger.info("📝 Creating concise job summaries for OpenAI analysis...")
+        # logger.info(" Creating concise job summaries for OpenAI analysis...")
         job_summaries = []
         
         for i, job in enumerate(jobs):
@@ -2765,7 +2757,7 @@ Background: {resume_summary.get('summary', 'Not provided')}
 JOBS TO ANALYZE:
 {chr(10).join([f"{i+1}. {job['title']} at {job['company']}{chr(10)}{str(job['description'])[:300]}..." for i, job in enumerate(job_summaries)])}
 
-🎯 SCORING GUIDELINES:
+ SCORING GUIDELINES:
 - 90-100%: Perfect match (has ALL required skills + experience level)
 - 75-89%: Excellent match (has most required skills + right experience)
 - 60-74%: Good match (has core skills, some gaps in experience/tools)
@@ -2807,7 +2799,7 @@ Focus on realistic assessment. Don't inflate scores - be honest about gaps.
         
         # Parse OpenAI response
         ai_response = response.choices[0].message.content
-        logger.info(f"🤖 OpenAI response length: {len(ai_response)} characters")
+        logger.info(f" OpenAI response length: {len(ai_response)} characters")
         
         # Try to parse JSON response
         import json
@@ -2850,7 +2842,7 @@ Focus on realistic assessment. Don't inflate scores - be honest about gaps.
 
 async def batch_analyze_jobs_similarity(jobs: List[Dict], resume_data: Dict) -> List[Dict]:
     """
-    🎯 FIXED: More realistic similarity-based matching when OpenAI is not available
+     FIXED: More realistic similarity-based matching when OpenAI is not available
     Reduced inflated scoring and made it more honest about limitations
     """
     try:
@@ -3020,7 +3012,7 @@ Summary:"""
                             job_summary['summary_description_length'] = len(job_summary['description'])
                             job_summary['summarization_method'] = 'huggingface_ai'
                             
-                            logger.info(f"🤖 AI summarized '{title}': {len(full_description)} → {len(job_summary['description'])} chars")
+                            logger.info(f" AI summarized '{title}': {len(full_description)} → {len(job_summary['description'])} chars")
                             return job_summary
         
         except Exception as e:
@@ -3095,7 +3087,7 @@ async def create_llama_context_extraction(job: Dict[str, Any]) -> Dict[str, Any]
         # Limit to 6000 characters to stay within token limits
         smart_description = full_description[:6000]
         if len(full_description) > 6000:
-            print(f"📝 Smart input limiting: {len(full_description)} → {len(smart_description)} chars to avoid rate limits")
+            print(f" Smart input limiting: {len(full_description)} → {len(smart_description)} chars to avoid rate limits")
         
         # Create intelligent extraction prompt for Llama
         extraction_prompt = f"""Extract the most important information from this job posting for accurate candidate matching. Focus on technical requirements, experience levels, and key responsibilities while preserving context.
@@ -3127,7 +3119,7 @@ Extracted Summary:"""
                 groq_api_key = os.getenv('GROQ_API_KEY')
                 logger.info(f"🔑 Groq API key found: {groq_api_key[:8]}...{groq_api_key[-4:] if len(groq_api_key) > 12 else ''}")
                 
-                logger.info("🔄 Calling Groq API for intelligent extraction...")
+                logger.info(" Calling Groq API for intelligent extraction...")
                 
                 groq_url = "https://api.groq.com/openai/v1/chat/completions"
                 headers = {
@@ -3164,11 +3156,11 @@ Extracted Summary:"""
                         logger.info(f"⏳ Waiting {wait_time:.1f}s between Groq calls to avoid rate limits...")
                         time.sleep(wait_time)
                 
-                # 🔄 SMART RATE LIMITING: Retry with exponential backoff
+                #  SMART RATE LIMITING: Retry with exponential backoff
                 max_retries = 3
                 for attempt in range(max_retries):
                     try:
-                        logger.info(f"🔄 Groq API attempt {attempt + 1}/{max_retries} for job: {title}")
+                        logger.info(f" Groq API attempt {attempt + 1}/{max_retries} for job: {title}")
                         response = requests.post(groq_url, headers=headers, json=payload, timeout=15)
                         
                         # Record successful API call time
@@ -3195,7 +3187,7 @@ Extracted Summary:"""
                                 logger.info("-" * 60)
                                 logger.info(llama_summary)
                                 logger.info("-" * 60)
-                                logger.info(f"📝 Summary length: {len(llama_summary)} chars")
+                                logger.info(f" Summary length: {len(llama_summary)} chars")
                                 logger.info(f" Final description length: {len(final_description)} chars")
                                 logger.info("=" * 80)
                                 
@@ -3251,7 +3243,7 @@ Extracted Summary:"""
                             break
                     
                     except requests.exceptions.Timeout:
-                        logger.warning(f"⏰ Groq API timeout (attempt {attempt + 1}/{max_retries})")
+                        logger.warning(f" Groq API timeout (attempt {attempt + 1}/{max_retries})")
                         if attempt < max_retries - 1:
                             time.sleep(2 ** attempt)  # Exponential backoff
                             continue
@@ -3359,7 +3351,7 @@ Extracted Summary:"""
                 logger.warning(f"HuggingFace extraction failed: {str(e)}")
         
         # Fallback to smart extraction if all LLM options unavailable
-        logger.info(f"🔄 All LLM options unavailable, using smart keyword extraction for '{title}'")
+        logger.info(f" All LLM options unavailable, using smart keyword extraction for '{title}'")
         return create_concise_job_summary(job)
         
     except Exception as e:
@@ -3456,7 +3448,7 @@ async def batch_analyze_jobs_advanced(jobs: List[Dict], resume_data: Dict, api_k
                 try:
                     # Try Groq extraction for intelligent summarization
                     if os.getenv('GROQ_API_KEY'):
-                        logger.info(f"🔄 Job {i+1}/{len(jobs)}: Trying Groq extraction for '{job.get('title', 'Unknown')}'")
+                        logger.info(f" Job {i+1}/{len(jobs)}: Trying Groq extraction for '{job.get('title', 'Unknown')}'")
                         groq_processed_job = await create_llama_context_extraction(job)
                         # logger.info("groq_processed_job",groq_processed_job)
                         
@@ -3476,7 +3468,7 @@ async def batch_analyze_jobs_advanced(jobs: List[Dict], resume_data: Dict, api_k
                             job_summary = create_concise_job_summary(job)
                     else:
                         # No Groq API key, use smart extraction
-                        logger.info(f"📝 Job {i+1}/{len(jobs)}: Using smart extraction (no Groq key)")
+                        logger.info(f" Job {i+1}/{len(jobs)}: Using smart extraction (no Groq key)")
                         job_summary = create_concise_job_summary(job)
                     
                     # Create summary object for OpenAI
@@ -3529,7 +3521,7 @@ async def batch_analyze_jobs_advanced(jobs: List[Dict], resume_data: Dict, api_k
         
         # Use OpenAI for intelligent job-resume matching
         logger.info(" OPENAI standard DEBUG: STARTING OPENAI STAGE...")
-        logger.info("🤖 Using OpenAI for intelligent job-resume matching...")
+        logger.info(" Using OpenAI for intelligent job-resume matching...")
         
         # Prepare focused resume summary
         resume_summary = {
@@ -3606,7 +3598,7 @@ Focus on accurate assessment based on the contextual job information provided.
         
         # Parse and process results
         ai_response = response.choices[0].message.content
-        logger.info(f"🤖 OpenAI standard matching response: {len(ai_response)} characters")
+        logger.info(f" OpenAI standard matching response: {len(ai_response)} characters")
         
         # Log the actual response to understand the format
         logger.info(f" OPENAI RESPONSE DEBUG: First 500 chars: {ai_response[:500]}")
@@ -3783,9 +3775,9 @@ def extract_ashby_jobs_fallback(url: str) -> List[Dict[str, Any]]:
                 "company": company_name,
                 "location": "Multiple Locations",
                 "url": url,
-                "description": f"""🚀 {company_name} uses Ashby job board platform with dynamic loading.
+                "description": f""" {company_name} uses Ashby job board platform with dynamic loading.
 
-📝 **How to see available positions:**
+ **How to see available positions:**
 1. **Visit the careers page directly**: {url}
 2. **Wait 3-5 seconds** for jobs to load via JavaScript
 3. **Refresh the Chrome extension** after jobs appear on the page
@@ -3930,15 +3922,15 @@ Based on their careers page, {company_name} appears to be actively hiring and me
             company_name = extract_company_from_url(url)
             return [{
                 "id": "ashby-loading-guidance",
-                "title": f"🕒 Jobs Loading at {company_name}",
+                "title": f" Jobs Loading at {company_name}",
                 "company": company_name,
                 "location": "Various Locations",
                 "url": url,
-                "description": f"""⏰ **Dynamic Job Loading Detected**
+                "description": f""" **Dynamic Job Loading Detected**
 
 {company_name} uses Ashby job board platform. If you're not seeing job listings:
 
-🔄 **Try these steps:**
+ **Try these steps:**
 1. **Wait**: Jobs may take 3-10 seconds to load
 2. **Refresh**: Refresh your browser and wait for content
 3. **Check directly**: Visit {url} in a new tab
@@ -4313,7 +4305,7 @@ def extract_deutsche_bank_job(soup: BeautifulSoup, job: Dict[str, Any], job_url:
             location_el = soup.select_one(selector)
             if location_el and location_el.get_text().strip():
                 job["location"] = location_el.get_text().strip()
-                logger.info(f"📍 Found location: {job['location']}")
+                logger.info(f" Found location: {job['location']}")
                 break
         
         # For Deutsche Bank, the main content is loaded dynamically
