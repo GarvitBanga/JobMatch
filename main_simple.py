@@ -393,7 +393,7 @@ async def privacy_policy():
         <html><body>
         <h1>Privacy Policy - JobMatch</h1>
         <p>JobMatch respects your privacy. We process resume data temporarily for job matching and do not store personal information permanently.</p>
-        <p>Contact: privacy@jobmatch.app</p>
+        <p>Contact: banga.g@nyu.edu</p>
         </body></html>
         """)
 
@@ -409,7 +409,7 @@ async def support_page():
         <li>Visit company career pages and click "Scan Jobs"</li>
         <li>View match scores and analysis in the popup</li>
     </ul>
-    <p>Contact: support@jobmatch.app</p>
+    <p>Contact: banga.g@nyu.edu</p>
     </body></html>
     """)
 
