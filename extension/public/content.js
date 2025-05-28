@@ -1,4 +1,4 @@
-// Content script for job extraction
+
 
 class JobExtractor {
   constructor() {
@@ -235,11 +235,11 @@ class JobExtractor {
       }
   }
 
-  // Find job links on the current page
+
   async findJobLinks() {
       const jobLinks = [];
       
-      // Check if this is Amazon Jobs SPA - needs special timing
+
       const isAmazonJobs = window.location.hostname.includes('amazon.jobs') || 
                           window.location.href.includes('amazon.jobs');
       
@@ -421,30 +421,30 @@ class JobExtractor {
       return job;
   }
 
-  // Extract full job details from a job page DOM
+
   extractFullJobFromPage(doc, basicJob) {
       const job = { ...basicJob };
       
       try {
     
           
-          // Workday-specific extraction
+
           if (job.url.includes('myworkdayjobs.com') || job.url.includes('workday')) {
               job.description = this.extractWorkdayJob(doc);
           }
-          // Greenhouse-specific extraction
+
           else if (job.url.includes('greenhouse.io') || job.url.includes('grnh.se')) {
               job.description = this.extractGreenhouseJob(doc);
           }
-          // Lever-specific extraction
+
           else if (job.url.includes('jobs.lever.co')) {
               job.description = this.extractLeverJob(doc);
           }
-          // BambooHR-specific extraction
+
           else if (job.url.includes('bamboohr.com')) {
               job.description = this.extractBambooHRJob(doc);
           }
-          // Generic extraction for other sites
+
           else {
               job.description = this.extractGenericJob(doc);
           }
@@ -457,7 +457,7 @@ class JobExtractor {
       return job;
   }
 
-  // Workday-specific extraction
+
   extractWorkdayJob(doc) {
       const contentSelectors = [
           '[data-automation-id="jobPostingDescription"]',
@@ -476,7 +476,7 @@ class JobExtractor {
       return 'Workday job description (detailed extraction in progress)';
   }
 
-  // Greenhouse-specific extraction
+
   extractGreenhouseJob(doc) {
       const contentSelectors = [
           '.job-post-content',
@@ -494,7 +494,7 @@ class JobExtractor {
       return 'Greenhouse job description (detailed extraction in progress)';
   }
 
-  // Lever-specific extraction
+
   extractLeverJob(doc) {
       const contentSelectors = [
           '.posting-content',
@@ -512,7 +512,7 @@ class JobExtractor {
       return 'Lever job description (detailed extraction in progress)';
   }
 
-  // BambooHR-specific extraction
+
   extractBambooHRJob(doc) {
       const contentSelectors = [
           '.BH-Job-Description',
@@ -530,7 +530,7 @@ class JobExtractor {
       return 'BambooHR job description (detailed extraction in progress)';
   }
 
-  // Generic job extraction
+
   extractGenericJob(doc) {
       const contentSelectors = [
           '.job-description',
@@ -545,7 +545,7 @@ class JobExtractor {
       for (const selector of contentSelectors) {
           const element = doc.querySelector(selector);
           if (element) {
-              // Remove scripts and unwanted elements
+
               const scripts = element.querySelectorAll('script, style, nav, footer');
               scripts.forEach(el => el.remove());
               
@@ -556,7 +556,7 @@ class JobExtractor {
       return 'Job description available (extraction in progress)';
   }
 
-  // Fallback basic extraction method
+
   extractJobListingsBasic() {
   const jobs = [];
   
@@ -595,7 +595,7 @@ class JobExtractor {
       requirements: []
     };
     
-    // Extract title
+
     const titleSelectors = [
       'h1', 'h2', 'h3', 'h4',
       '.job-title', '.position-title', '.title',
@@ -610,7 +610,7 @@ class JobExtractor {
       }
     }
     
-    // Extract company
+
     const companySelectors = [
       '.company', '.company-name', '.employer',
       '[data-testid*="company"]'
@@ -628,7 +628,7 @@ class JobExtractor {
       job.company = document.title.split(' - ')[0] || window.location.hostname;
     }
     
-    // Extract location
+
     const locationSelectors = [
       '.location', '.job-location', '.city',
       '[data-testid*="location"]'
@@ -642,7 +642,7 @@ class JobExtractor {
       }
     }
     
-    // Extract URL
+
     const linkEl = element.closest('a') || element.querySelector('a');
     if (linkEl && linkEl.href) {
       job.url = linkEl.href;
@@ -650,7 +650,7 @@ class JobExtractor {
       job.url = window.location.href;
     }
     
-    // Extract description (basic)
+
     const descEl = element.querySelector('.description, .summary, .excerpt');
     if (descEl) {
       job.description = descEl.textContent.trim().substring(0, 200);
@@ -710,7 +710,7 @@ async function extractPageContent() {
         }));
     }
   
-  // Extract main text content
+
   const mainContent = document.querySelector('main') || 
                      document.querySelector('.main') ||
                      document.querySelector('#main') ||
@@ -727,7 +727,7 @@ async function extractPageContent() {
   return content;
 }
 
-// Listen for messages from background script or popup
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log('Content script received message:', message);
   
@@ -739,7 +739,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               console.error('Error in EXTRACT_CONTENT:', error);
               sendResponse({ error: error.message });
           });
-          return true; // Keep message channel open for async response
+          return true; 
       
     case 'EXTRACT_JOBS':
           const extractor = new JobExtractor();
@@ -760,6 +760,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-// Auto-extraction feature removed - extension only works when manually clicked
+
 
 console.log('Content script initialization complete'); 

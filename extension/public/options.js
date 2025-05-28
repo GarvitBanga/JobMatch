@@ -1,4 +1,4 @@
-// Options page for JobMatch extension
+
 
 document.addEventListener('DOMContentLoaded', function() {
     loadSettings();
@@ -6,16 +6,16 @@ document.addEventListener('DOMContentLoaded', function() {
 });
     
 function setupEventListeners() {
-    // Settings form submission
+
     document.getElementById('settingsForm').addEventListener('submit', saveSettings);
     
-    // Reset button
+
     document.getElementById('resetBtn').addEventListener('click', resetSettings);
     
-    // Test connection button
+
     document.getElementById('testConnectionBtn').addEventListener('click', testConnection);
     
-    // Resume file upload
+
     document.getElementById('resumeFile').addEventListener('change', handleResumeUpload);
 }
 
@@ -29,14 +29,14 @@ async function loadSettings() {
             'resumeProcessingMethod'
         ]);
         
-        // Populate form fields
+
         document.getElementById('matchThreshold').value = settings.matchThreshold || 70;
         
-        // Show resume info and insights if available
+
         if (settings.resumeData) {
             showResumeInfo(settings.resumeFileName, settings.resumeUploadDate, settings.resumeProcessingMethod);
             
-            // Show career insights if available
+
             if (settings.resumeData.career_insights) {
                 showCareerInsights(settings.resumeData.career_insights);
             }
@@ -69,11 +69,11 @@ async function resetSettings() {
     try {
         await chrome.storage.sync.clear();
         
-        // Reset form to defaults
+
         document.getElementById('matchThreshold').value = 70;
         document.getElementById('resumeFile').value = '';
         
-        // Hide resume info and insights
+
         hideResumeInfo();
         hideCareerInsights();
         
@@ -88,11 +88,10 @@ async function resetSettings() {
 async function testConnection() {
     try {
         const apiEndpoint = 'https://jobmatch-production.up.railway.app/api/v1';
-        const apiKey = 'ext_jobmatch_secure_key_2024';  // Must match server config
+        const apiKey = 'ext_jobmatch_secure_key_2024';
         
         showStatus('Testing connection...', 'info');
         
-        // Remove /api/v1 from endpoint for health check
         const baseUrl = apiEndpoint.replace('/api/v1', '');
         const response = await fetch(`${baseUrl}/health`, {
             headers: {
@@ -124,7 +123,7 @@ async function handleResumeUpload(event) {
     try {
         showStatus('Processing resume...', 'info');
         
-        // Validate file type
+
         const allowedTypes = ['.pdf', '.doc', '.docx', '.txt'];
         const fileExt = '.' + file.name.split('.').pop().toLowerCase();
         
@@ -133,7 +132,7 @@ async function handleResumeUpload(event) {
         }
         
         const apiEndpoint = 'https://jobmatch-production.up.railway.app/api/v1';
-        const apiKey = 'ext_jobmatch_secure_key_2024';  // Must match server config
+        const apiKey = 'ext_jobmatch_secure_key_2024'; 
         
         const formData = new FormData();
         formData.append('file', file);
@@ -252,12 +251,12 @@ function showCareerInsights(insights) {
         box-shadow: 0 8px 25px rgba(0,0,0,0.15);
     `;
     
-    // Career Level
+
     const careerLevel = insights.career_level || {};
     const currentLevel = careerLevel.current_level || 'Unknown';
     const experience = careerLevel.years_experience || 'Unknown';
     
-    // Recommended Profiles
+
     const profiles = insights.recommended_job_profiles || [];
     const profilesHTML = profiles.slice(0, 3).map(profile => `
         <div style="background: rgba(255,255,255,0.15); padding: 12px; border-radius: 8px; margin: 8px 0;">
@@ -270,7 +269,7 @@ function showCareerInsights(insights) {
         </div>
     `).join('');
     
-    // Skill Analysis
+
     const skillAnalysis = insights.skill_analysis || {};
     const strongSkills = skillAnalysis.strong_skills || [];
     const recommendedSkills = skillAnalysis.recommended_skills || [];
@@ -282,7 +281,7 @@ function showCareerInsights(insights) {
         </div>
     `).join('');
     
-    // Industry Recommendations
+
     const industries = insights.industry_recommendations || [];
     const industryHTML = industries.slice(0, 2).map(industry => `
         <span style="background: rgba(255,255,255,0.2); padding: 4px 8px; border-radius: 4px; margin: 4px; display: inline-block; font-size: 13px;">
@@ -290,7 +289,7 @@ function showCareerInsights(insights) {
         </span>
     `).join('');
     
-    // Salary Insights
+
     const salaryInsights = insights.salary_insights || {};
     const estimatedRange = salaryInsights.estimated_range || 'Not available';
     
@@ -478,20 +477,20 @@ function showStatus(message, type) {
     status.className = `status ${type}`;
     status.style.display = 'block';
     
-    // Add info type styling
+
     if (type === 'info') {
         status.style.backgroundColor = '#dbeafe';
         status.style.color = '#1e40af';
         status.style.border = '1px solid #93c5fd';
     }
     
-    // Auto-hide after 5 seconds
+
     setTimeout(() => {
         status.style.display = 'none';
     }, 5000);
 }
 
-// Listen for messages from background script
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     console.log('Options page received message:', message);
     

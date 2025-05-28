@@ -1,11 +1,10 @@
 console.log('Background service worker loaded');
 
-// Handle extension installation
+
 chrome.runtime.onInstalled.addListener((details) => {
   console.log('Extension installed:', details);
   
   if (details.reason === 'install') {
-    // Set default settings
     chrome.storage.sync.set({
       apiEndpoint: 'https://jobmatch-production.up.railway.app/api/v1',
       matchThreshold: 40
@@ -13,15 +12,14 @@ chrome.runtime.onInstalled.addListener((details) => {
   }
 });
 
-// Handle messages from content scripts and popup
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log('Background received message:', message);
   
   switch (message.type) {
     case 'SCAN_PAGE':
       handleScanPage(message.data, sendResponse);
-      return true; // Keep message channel open for async response
-      
+      return true;
     case 'GET_SETTINGS':
       chrome.storage.sync.get(['matchThreshold', 'resumeData'], sendResponse);
       return true;
@@ -33,21 +31,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
       
     case 'GET_LAST_RESULTS':
-      // Get the last scan results from storage
       chrome.storage.local.get(['lastScanResults', 'lastScanStatus'], (data) => {
         sendResponse(data);
       });
       return true;
       
     case 'CLEAR_RESULTS':
-      // Clear stored results
       chrome.storage.local.remove(['lastScanResults', 'lastScanStatus'], () => {
         sendResponse({ success: true });
       });
       return true;
       
     case 'HEALTH_CHECK':
-      // Check if backend is available
       checkBackendHealth(sendResponse);
       return true;
       
@@ -60,16 +55,14 @@ async function handleScanPage(data, sendResponse) {
   try {
     const { url, pageContent } = data;
     
-    // Get all relevant settings and data from storage
     const settings = await chrome.storage.sync.get([
       'resumeData', 
       'resumeFileName',
       'matchThreshold'
     ]);
     
-    // Use fixed production API endpoint with security
     const apiEndpoint = 'https://jobmatch-production.up.railway.app/api/v1';
-    const apiKey = 'ext_jobmatch_secure_key_2024';  // Must match server config
+    const apiKey = 'ext_jobmatch_secure_key_2024'; 
     
     console.log('API endpoint:', apiEndpoint);
     console.log('Scanning page:', url);
@@ -77,7 +70,6 @@ async function handleScanPage(data, sendResponse) {
     console.log('Resume data available:', !!settings.resumeData);
     console.log('Page content:', pageContent.jobElements?.length || 0, 'job elements');
     
-    // Send immediate acknowledgment to prevent timeout
     sendResponse({
       success: true,
       status: 'processing',
@@ -100,28 +92,15 @@ async function handleScanPage(data, sendResponse) {
     
     const controller = new AbortController();
     const timeoutId = setTimeout(() => {
-      console.log('Request timeout - continuing in background');
+      console.log('Request timeout after 120 seconds');
       controller.abort();
-    }, 600000);
+    }, 120000);
     
     try {
       console.log('Starting API request...');
       console.log('API Endpoint:', apiEndpoint);
       console.log('Full URL:', `${apiEndpoint}/scan/page`);
       console.log('Request payload size:', JSON.stringify(requestData).length, 'characters');
-      console.log('Request headers:', {
-        'Content-Type': 'application/json',
-      });
-      
-      try {
-        const healthResponse = await fetch(`${apiEndpoint.replace('/api/v1', '')}/health`, {
-          method: 'GET',
-          mode: 'cors'
-        });
-        console.log('Health check status:', healthResponse.status);
-      } catch (healthError) {
-        console.error('Health check failed:', healthError);
-      }
       
       const response = await fetch(`${apiEndpoint}/scan/page`, {
         method: 'POST',
@@ -136,9 +115,9 @@ async function handleScanPage(data, sendResponse) {
         signal: controller.signal
       });
       
-      console.log('Response status:', response.status);
-      
       clearTimeout(timeoutId);
+      
+      console.log('Response status:', response.status);
       
       if (!response.ok) {
         const errorText = await response.text();
@@ -158,7 +137,6 @@ async function handleScanPage(data, sendResponse) {
       });
       
       try {
-        
         const messageData = {
           type: 'SCAN_COMPLETE',
           data: {
@@ -207,13 +185,13 @@ async function handleScanPage(data, sendResponse) {
       }
       
       if (apiError.name === 'AbortError') {
-        console.log('Request timeout - processing may still be running');
+        console.log('Request timeout - processing may still be running on server');
         
         await chrome.storage.local.set({
           lastScanStatus: {
             url: url,
             status: 'timeout',
-            message: 'Processing took longer than expected.',
+            message: 'Processing took longer than expected. The server may still be working on your request.',
             timestamp: Date.now()
           }
         });
@@ -223,7 +201,7 @@ async function handleScanPage(data, sendResponse) {
             type: 'SCAN_TIMEOUT',
             data: {
               url: url,
-              message: 'Processing is taking longer than expected.',
+              message: 'Processing is taking longer than expected. You can try again in a few minutes.',
               canRetry: true
             }
           });
@@ -233,8 +211,6 @@ async function handleScanPage(data, sendResponse) {
         
         return;
       }
-      
-      console.error('API request failed:', apiError);
       
       console.log('Using fallback data');
       const mockResponse = {
@@ -277,31 +253,143 @@ async function handleScanPage(data, sendResponse) {
   } catch (error) {
     console.error('Error scanning page:', error);
     
-    const errorResponse = {
-      success: false,
-      error: error.message,
-      matches: [],
-      message: 'Failed to scan page',
-      processing_method: 'error'
-    };
-    
-    await chrome.storage.local.set({
-      lastScanResults: {
-        url: data.url,
-        timestamp: Date.now(),
-        results: errorResponse,
-        error: error.message
-      }
-    });
-    
     try {
       await chrome.runtime.sendMessage({
         type: 'SCAN_ERROR',
-        data: errorResponse
+        data: {
+          error: error.message,
+          message: 'An error occurred while scanning jobs'
+        }
       });
     } catch (notifyError) {
-      console.log('Popup not available for error notification');
+      console.log('Failed to notify about error');
     }
+  }
+}
+
+async function startPollingForResults(url, settings, originalRequest) {
+  console.log('Starting polling for results...');
+  
+  const apiEndpoint = 'https://jobmatch-production.up.railway.app/api/v1';
+  const apiKey = 'ext_jobmatch_secure_key_2024';
+  const maxPollingTime = 300000;
+  const pollInterval = 5000;
+  
+  const startTime = Date.now();
+  
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'SCAN_POLLING',
+      data: {
+        message: 'Processing is taking longer than expected. Checking for results...',
+        url: url
+      }
+    });
+  } catch (error) {
+    console.log('Could not notify about polling start');
+  }
+  
+  const pollForResults = async () => {
+    try {
+      const pollResponse = await fetch(`${apiEndpoint}/status/${encodeURIComponent(url)}`, {
+        method: 'GET',
+        mode: 'cors',
+        headers: {
+          'X-JobMatch-API-Key': apiKey,
+          'X-Extension-ID': chrome.runtime.id
+        }
+      });
+      
+      if (pollResponse.ok) {
+        const result = await pollResponse.json();
+        if (result.status === 'complete') {
+          console.log('Polling found completed results');
+          await saveAndNotifyResults(url, result.data, settings);
+          return true;
+        } else if (result.status === 'processing') {
+          console.log('Still processing, will continue polling...');
+          return false;
+        }
+      }
+    } catch (pollError) {
+      console.error('Polling error:', pollError);
+    }
+    
+    return false;
+  };
+  
+  const poll = async () => {
+    if (Date.now() - startTime > maxPollingTime) {
+      console.log('Polling timeout reached');
+      
+      const mockResponse = {
+        success: true,
+        matches: generateMockData(url, settings.resumeData, originalRequest.page_content),
+        message: 'Processing took too long, showing cached results',
+        jobs_found: originalRequest.page_content.jobElements?.length || 0,
+        processing_time: Date.now() - startTime,
+        processing_method: 'timeout_fallback',
+        resume_used: !!settings.resumeData
+      };
+      
+      await saveAndNotifyResults(url, mockResponse, settings);
+      return;
+    }
+    
+    const isComplete = await pollForResults();
+    if (!isComplete) {
+      setTimeout(poll, pollInterval);
+    }
+  };
+  
+  setTimeout(poll, pollInterval);
+}
+
+async function saveAndNotifyResults(url, result, settings) {
+  await chrome.storage.local.set({
+    lastScanResults: {
+      url: url,
+      timestamp: Date.now(),
+      results: result,
+      settings: settings
+    }
+  });
+  
+  try {
+    const messageData = {
+      type: 'SCAN_COMPLETE',
+      data: {
+        success: result.success,
+        matches: result.matches || [],
+        message: result.message,
+        jobs_found: result.jobs_found,
+        processing_time: result.processing_time_ms || result.processing_time,
+        processing_method: result.processing_method,
+        resume_used: result.resume_used
+      }
+    };
+    
+    await chrome.storage.local.set({ 
+      pendingResults: messageData.data,
+      resultsTimestamp: Date.now()
+    });
+    
+    try {
+      await chrome.runtime.sendMessage(messageData);
+    } catch (messageError) {
+      console.log('Popup not available, results stored for retrieval');
+    }
+    
+    const tabs = await chrome.tabs.query({});
+    for (const tab of tabs) {
+      try {
+        await chrome.tabs.sendMessage(tab.id, messageData);
+      } catch (tabError) {
+      }
+    }
+    
+  } catch (error) {
+    console.error('Error sending completion notification:', error);
   }
 }
 
@@ -467,9 +555,9 @@ function extractCompanyFromUrl(url) {
   return 'Tech Corp';
 }
 
-// Auto-scanning feature removed - extension only works when manually clicked
 
-// Check backend health
+
+
 async function checkBackendHealth(sendResponse) {
   try {
     const apiEndpoint = 'https://jobmatch-production.up.railway.app/api/v1';

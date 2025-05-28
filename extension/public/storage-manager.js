@@ -1,40 +1,40 @@
-// Chrome Storage Manager for Bulk-Scanner Extension
-// Handles resume data, job results, preferences, and caching
+
+
 
 class StorageManager {
     constructor() {
         this.storageKeys = {
-            // Resume data (chrome.storage.local - can be large)
+
             RESUME_DATA: 'resumeData',
             RESUME_FILE_CONTENT: 'resumeFileContent',
             RESUME_PARSED: 'resumeParsed',
             
-            // Job results and history (chrome.storage.local)
+
             JOB_RESULTS: 'jobResults',
             SCAN_HISTORY: 'scanHistory',
             CACHED_JOBS: 'cachedJobs',
             
-            // User preferences (chrome.storage.sync - syncs across devices)
+
             API_ENDPOINT: 'apiEndpoint',
             MATCH_THRESHOLD: 'matchThreshold',
             AUTO_SCAN: 'autoScan',
             USER_PREFERENCES: 'userPreferences',
             
-            // Session data (chrome.storage.session - temporary)
+
             CURRENT_SCAN: 'currentScan',
             LAST_PAGE_CONTENT: 'lastPageContent'
         };
         
         this.maxStorageItems = {
-            JOB_RESULTS: 100,        // Keep last 100 job results
-            SCAN_HISTORY: 50,        // Keep last 50 scans
-            CACHED_JOBS: 200         // Cache up to 200 job descriptions
+            JOB_RESULTS: 100,      
+            SCAN_HISTORY: 50,        
+            CACHED_JOBS: 200         
         };
     }
     
-    // ========================================
-    // RESUME MANAGEMENT
-    // ========================================
+
+
+
     
     async saveResumeFile(file, content) {
         try {
@@ -43,7 +43,7 @@ class StorageManager {
                 size: file.size,
                 type: file.type,
                 uploadedAt: new Date().toISOString(),
-                content: content // Base64 or text content
+                content: content 
             };
             
             await chrome.storage.local.set({
@@ -70,7 +70,7 @@ class StorageManager {
                 [this.storageKeys.RESUME_PARSED]: resumeParsed
             });
             
-            // Also save basic resume indicator in sync storage
+
             await chrome.storage.sync.set({
                 [this.storageKeys.RESUME_DATA]: {
                     hasResume: true,
@@ -120,9 +120,9 @@ class StorageManager {
         }
     }
     
-    // ========================================
-    // JOB RESULTS MANAGEMENT
-    // ========================================
+
+
+
     
     async saveJobResults(scanData) {
         try {
@@ -137,14 +137,14 @@ class StorageManager {
                 pageTitle: scanData.pageTitle || ''
             };
             
-            // Get existing results
+
             const existing = await chrome.storage.local.get([this.storageKeys.JOB_RESULTS]);
             const jobResults = existing[this.storageKeys.JOB_RESULTS] || [];
             
-            // Add new result at the beginning
+
             jobResults.unshift(jobResult);
             
-            // Keep only the latest N results
+
             const trimmedResults = jobResults.slice(0, this.maxStorageItems.JOB_RESULTS);
             
             await chrome.storage.local.set({
@@ -181,9 +181,9 @@ class StorageManager {
         }
     }
     
-    // ========================================
-    // SCAN HISTORY MANAGEMENT
-    // ========================================
+
+
+
     
     async saveScanHistory(url, pageTitle, jobsFound) {
         try {
@@ -198,7 +198,7 @@ class StorageManager {
             const existing = await chrome.storage.local.get([this.storageKeys.SCAN_HISTORY]);
             const scanHistory = existing[this.storageKeys.SCAN_HISTORY] || [];
             
-            // Check if URL was recently scanned (within last hour)
+
             const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
             const recentScan = scanHistory.find(entry => 
                 entry.url === url && entry.scannedAt > oneHourAgo
@@ -234,9 +234,9 @@ class StorageManager {
         }
     }
     
-    // ========================================
-    // USER PREFERENCES MANAGEMENT
-    // ========================================
+
+
+
     
     async savePreferences(preferences) {
         try {
@@ -275,9 +275,9 @@ class StorageManager {
         }
     }
     
-    // ========================================
-    // CACHING MANAGEMENT
-    // ========================================
+
+
+
     
     async cacheJobData(url, jobData) {
         try {
@@ -293,10 +293,10 @@ class StorageManager {
             
             cachedJobs[url] = cacheEntry;
             
-            // Remove old cache entries if too many
+
             const cacheKeys = Object.keys(cachedJobs);
             if (cacheKeys.length > this.maxStorageItems.CACHED_JOBS) {
-                // Sort by cached date and remove oldest
+
                 const sortedEntries = cacheKeys
                     .map(key => ({ key, entry: cachedJobs[key] }))
                     .sort((a, b) => new Date(b.entry.cachedAt) - new Date(a.entry.cachedAt));
@@ -330,7 +330,7 @@ class StorageManager {
             const cacheEntry = cachedJobs[url];
             if (!cacheEntry) return null;
             
-            // Check if cache is still valid
+
             const cacheAge = new Date() - new Date(cacheEntry.cachedAt);
             const maxAge = maxAgeHours * 60 * 60 * 1000;
             
@@ -347,9 +347,9 @@ class StorageManager {
         }
     }
     
-    // ========================================
-    // UTILITY METHODS
-    // ========================================
+
+
+
     
     generateId() {
         return Date.now().toString(36) + Math.random().toString(36).substr(2);
@@ -360,14 +360,14 @@ class StorageManager {
         for (let i = 0; i < str.length; i++) {
             const char = str.charCodeAt(i);
             hash = ((hash << 5) - hash) + char;
-            hash = hash & hash; // Convert to 32bit integer
+            hash = hash & hash; 
         }
         return hash.toString();
     }
     
-    // ========================================
-    // STORAGE STATISTICS
-    // ========================================
+
+
+
     
     async getStorageStats() {
         try {
@@ -391,7 +391,7 @@ class StorageManager {
                 }
             };
             
-            // Calculate size per item type
+
             Object.entries(localData).forEach(([key, value]) => {
                 stats.local.items[key] = calculateSize(value);
             });
@@ -419,5 +419,5 @@ class StorageManager {
     }
 }
 
-// Export as global for use in other scripts
+
 window.StorageManager = StorageManager; 

@@ -1,4 +1,4 @@
-// Popup script for JobMatch extension
+
 
 console.log('Popup script loaded');
 
@@ -40,9 +40,9 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
             }
             
-            // Also check for very recent results (within 2 minutes) even with different URLs
+
             if (storedResults.lastScanResults && 
-                Date.now() - storedResults.lastScanResults.timestamp < 120000) { // 2 minutes
+                Date.now() - storedResults.lastScanResults.timestamp < 120000) { 
                 
                 const results = storedResults.lastScanResults.results;
                 if (results.success && results.matches && results.matches.length > 0) {
@@ -52,7 +52,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     const timeAgo = Math.round((Date.now() - storedResults.lastScanResults.timestamp) / 1000);
                     showStatus(`Recent scan completed ${timeAgo}s ago - ${results.matches.length} matches found! (Different page)`, 'success');
                     
-                    // Add a button to start fresh scan
+
                     const freshScanButton = document.createElement('button');
                     freshScanButton.textContent = 'Scan Current Page Instead';
                     freshScanButton.className = 'secondary-button';
@@ -66,15 +66,15 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
             }
             
-            // Check if there's a timeout status for this page
+
             if (storedResults.lastScanStatus && 
                 storedResults.lastScanStatus.url === tab.url && 
                 storedResults.lastScanStatus.status === 'timeout' &&
-                Date.now() - storedResults.lastScanStatus.timestamp < 300000) { // 5 minutes
+                Date.now() - storedResults.lastScanStatus.timestamp < 300000) { 
                 
                 showStatus('Previous scan timed out. Backend may still be processing. Try again or check backend logs.', 'loading');
                 
-                // Add button to check for results
+
                 const checkButton = document.createElement('button');
                 checkButton.textContent = 'Check for Results';
                 checkButton.onclick = () => checkForStoredResults();
@@ -83,10 +83,10 @@ document.addEventListener('DOMContentLoaded', function() {
                 return;
             }
             
-            // Check settings
+
             const settings = await chrome.storage.sync.get(['apiEndpoint', 'resumeData']);
             
-            // Update UI based on available data
+
             if (settings.resumeData) {
                 showStatus('Resume loaded - Better matching available', 'success');
             } else {
@@ -105,10 +105,10 @@ document.addEventListener('DOMContentLoaded', function() {
             showStatus('Scanning page for jobs...', 'loading');
             results.classList.add('hidden');
             
-            // Get current tab
+
             const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
             
-            // Check if content script is loaded by sending a ping
+
             let contentScriptReady = false;
             try {
                 const pingResponse = await chrome.tabs.sendMessage(tab.id, { type: 'PING' });
@@ -117,7 +117,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 console.log('Content script not ready, injecting...');
             }
             
-            // If content script not ready, inject it
+
             if (!contentScriptReady) {
                 try {
                     await chrome.scripting.executeScript({
@@ -125,7 +125,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         files: ['content.js']
                     });
                     
-                    // Wait a moment for the script to initialize
+
                     await new Promise(resolve => setTimeout(resolve, 1000));
                 } catch (error) {
                     console.error('Failed to inject content script:', error);
@@ -133,7 +133,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
             }
             
-            // Send message to content script to extract page content
+
             const pageContent = await new Promise((resolve, reject) => {
                 chrome.tabs.sendMessage(tab.id, { type: 'EXTRACT_CONTENT' }, (response) => {
                     if (chrome.runtime.lastError) {
@@ -269,7 +269,7 @@ document.addEventListener('DOMContentLoaded', function() {
     function displayResults(response) {
         const { matches, jobs_found, processing_method, resume_used, api_features } = response;
         
-        // Update status
+
         let statusText = `Found ${jobs_found} jobs`;
         if (resume_used) {
             statusText += ' (Using your resume)';
@@ -280,7 +280,7 @@ document.addEventListener('DOMContentLoaded', function() {
         
         showStatus(statusText, 'success');
         
-        // Display job matches
+
         if (matches && matches.length > 0) {
             results.innerHTML = '';
             
@@ -323,7 +323,7 @@ document.addEventListener('DOMContentLoaded', function() {
             ` : ''}
         `;
         
-        // Add click handler to open job URL
+
         if (job.url) {
             jobDiv.style.cursor = 'pointer';
             jobDiv.addEventListener('click', () => {
@@ -371,7 +371,7 @@ Tips:
         alert(helpText);
     }
     
-    // Show progress information for large job batches
+
     function showProgressInfo(jobCount) {
         const progressDiv = document.createElement('div');
         progressDiv.id = 'progress-info';
@@ -391,10 +391,10 @@ Tips:
             <div style="font-size: 11px; opacity: 0.8;">Backend is fetching full job descriptions from individual pages</div>
         `;
         
-        // Insert after status
+
         status.parentNode.insertBefore(progressDiv, status.nextSibling);
         
-        // Auto-remove after 30 seconds
+
         setTimeout(() => {
             if (progressDiv.parentNode) {
                 progressDiv.remove();
@@ -402,7 +402,7 @@ Tips:
         }, 30000);
     }
     
-    // Show timeout UI with options
+
     function showTimeoutUI(timeoutData) {
         const timeoutDiv = document.createElement('div');
         timeoutDiv.style.cssText = `
@@ -424,12 +424,12 @@ Tips:
             </div>
         `;
         
-        // Clear previous content and show timeout UI
+
         results.innerHTML = '';
         results.appendChild(timeoutDiv);
         results.classList.remove('hidden');
         
-        // Add event listeners
+
         timeoutDiv.querySelector('#check-results-btn').addEventListener('click', checkForStoredResults);
         timeoutDiv.querySelector('#retry-scan-btn').addEventListener('click', () => {
             timeoutDiv.remove();
@@ -439,7 +439,7 @@ Tips:
         scanButton.disabled = false;
     }
     
-    // Check for stored results from background processing
+
     async function checkForStoredResults() {
         try {
             showStatus('Checking for completed results...', 'loading');
@@ -450,29 +450,29 @@ Tips:
                 const results = storedResults.lastScanResults.results;
                 const timeAgo = Math.round((Date.now() - storedResults.lastScanResults.timestamp) / 1000);
                 
-                // Even show mock results if they exist, but indicate they are fallback
+
                 if (results.success && results.matches) {
                     console.log('Found completed results!', results);
                     
-                    // Check if these are mock results and warn user
+
                     if (results.processing_method === 'mock') {
                         console.warn('These are mock/fallback results. Backend processing may have failed.');
                         displayResults(results);
                         showStatus(`Found fallback results (${timeAgo}s ago) - Backend may have timed out. Try scanning again.`, 'loading');
                         
-                        // Add button to try again
+
                         const retryButton = document.createElement('button');
                         retryButton.textContent = 'Scan Again with Backend';
                         retryButton.style.cssText = 'margin-top: 8px; padding: 6px 12px; font-size: 12px; background: rgba(52, 152, 219, 0.8); color: white; border: none; border-radius: 4px; cursor: pointer;';
                         retryButton.onclick = () => {
-                            // Clear mock results and rescan
+
                             chrome.storage.local.remove(['lastScanResults', 'lastScanStatus']);
                             handleScanPage();
                         };
                         status.parentNode.insertBefore(retryButton, status.nextSibling);
                         
                     } else {
-                        // Real backend results
+
                         displayResults(results);
                         showStatus(`Found completed scan results (${timeAgo}s ago) - ${results.matches.length} matches!`, 'success');
                     }
@@ -491,4 +491,3 @@ Tips:
     }
 });
 
-// No longer needed - using content script messaging instead of function injection 
