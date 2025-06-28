@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: jobmatch-api
+    env: docker
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: ALLOWED_ORIGINS
+        value: "chrome-extension://*"
+    healthCheckPath: /health
+    autoDeploy: true 
