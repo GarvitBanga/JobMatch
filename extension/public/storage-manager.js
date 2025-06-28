@@ -265,7 +265,7 @@ class StorageManager {
             
             return {
                 ...result[this.storageKeys.USER_PREFERENCES],
-                apiEndpoint: result[this.storageKeys.API_ENDPOINT] || 'https://jobmatch-production.up.railway.app/api/v1',
+                apiEndpoint: result[this.storageKeys.API_ENDPOINT] || 'https://jobmatch-x2lj.onrender.com/api/v1',
                 matchThreshold: result[this.storageKeys.MATCH_THRESHOLD] || 70,
                 autoScan: result[this.storageKeys.AUTO_SCAN] || false
             };

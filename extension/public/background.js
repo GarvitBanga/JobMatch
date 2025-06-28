@@ -6,7 +6,7 @@ chrome.runtime.onInstalled.addListener((details) => {
   
   if (details.reason === 'install') {
     chrome.storage.sync.set({
-      apiEndpoint: 'https://jobmatch-production.up.railway.app/api/v1',
+      apiEndpoint: 'https://jobmatch-x2lj.onrender.com/api/v1',
       matchThreshold: 40
     });
   }
@@ -61,7 +61,7 @@ async function handleScanPage(data, sendResponse) {
       'matchThreshold'
     ]);
     
-    const apiEndpoint = 'https://jobmatch-production.up.railway.app/api/v1';
+    const apiEndpoint = 'https://jobmatch-x2lj.onrender.com/api/v1';
     const apiKey = 'ext_jobmatch_secure_key_2024'; 
     
     console.log('API endpoint:', apiEndpoint);
@@ -270,7 +270,7 @@ async function handleScanPage(data, sendResponse) {
 async function startPollingForResults(url, settings, originalRequest) {
   console.log('Starting polling for results...');
   
-  const apiEndpoint = 'https://jobmatch-production.up.railway.app/api/v1';
+  const apiEndpoint = 'https://jobmatch-x2lj.onrender.com/api/v1';
   const apiKey = 'ext_jobmatch_secure_key_2024';
   const maxPollingTime = 300000;
   const pollInterval = 5000;
@@ -560,7 +560,7 @@ function extractCompanyFromUrl(url) {
 
 async function checkBackendHealth(sendResponse) {
   try {
-    const apiEndpoint = 'https://jobmatch-production.up.railway.app/api/v1';
+    const apiEndpoint = 'https://jobmatch-x2lj.onrender.com/api/v1';
     
     const response = await fetch(`${apiEndpoint.replace('/api/v1', '')}/health`, {
       method: 'GET',
@@ -584,7 +584,7 @@ async function checkBackendHealth(sendResponse) {
     sendResponse({
       success: false,
       error: error.message,
-      endpoint: 'https://jobmatch-production.up.railway.app/api/v1'
+      endpoint: 'https://jobmatch-x2lj.onrender.com/api/v1'
     });
   }
 } 

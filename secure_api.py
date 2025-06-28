@@ -152,7 +152,7 @@ EXTENSION_HEADERS_CODE = """
 // Add to extension's background.js or content.js:
 
 const API_CONFIG = {
-    baseUrl: 'https://jobmatch-production.up.railway.app/api/v1',
+    baseUrl: 'https://jobmatch-x2lj.onrender.com/api/v1',
     apiKey: 'ext_jobmatch_secure_key_2024',  // Match server config
     extensionId: chrome.runtime.id
 };

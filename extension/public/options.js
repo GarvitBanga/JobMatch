@@ -87,7 +87,7 @@ async function resetSettings() {
 
 async function testConnection() {
     try {
-        const apiEndpoint = 'https://jobmatch-production.up.railway.app/api/v1';
+        const apiEndpoint = 'https://jobmatch-x2lj.onrender.com/api/v1';
         const apiKey = 'ext_jobmatch_secure_key_2024';
         
         showStatus('Testing connection...', 'info');
@@ -131,7 +131,7 @@ async function handleResumeUpload(event) {
             throw new Error(`Unsupported file type. Allowed: ${allowedTypes.join(', ')}`);
         }
         
-        const apiEndpoint = 'https://jobmatch-production.up.railway.app/api/v1';
+        const apiEndpoint = 'https://jobmatch-x2lj.onrender.com/api/v1';
         const apiKey = 'ext_jobmatch_secure_key_2024'; 
         
         const formData = new FormData();

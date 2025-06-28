@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "JobMatch - AI Resume Matcher",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "AI-powered job scanner that matches your resume against job postings. Get relevance scores and find your perfect role faster.",
   "author": "JobMatch Team",
   "homepage_url": "https://github.com/garvitbanga/JobMatch",
@@ -13,7 +13,7 @@
     "scripting"
   ],
   "host_permissions": [
-    "https://jobmatch-production.up.railway.app/*"
+    "https://jobmatch-x2lj.onrender.com/*"
   ],
   "background": {
     "service_worker": "background.js"

@@ -2,7 +2,7 @@
 
 class JobExtractor {
   constructor() {
-              this.apiEndpoint = 'https://jobmatch-production.up.railway.app/api/v1';
+              this.apiEndpoint = 'https://jobmatch-x2lj.onrender.com/api/v1';
       this.maxJobsToFetch = 10;
       this.fetchTimeout = 10000000;
   }

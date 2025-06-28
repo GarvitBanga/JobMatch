@@ -90,7 +90,7 @@ document.addEventListener('DOMContentLoaded', function() {
             if (settings.resumeData) {
                 showStatus('Resume loaded - Better matching available', 'success');
             } else {
-                showStatus('No resume uploaded - Basic matching only', 'loading');
+                showStatus('No resume uploaded - Upload a resume in Settings and refresh the page', 'loading');
             }
             
         } catch (error) {
